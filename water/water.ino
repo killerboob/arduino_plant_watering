@@ -1,314 +1,265 @@
 /*
- * ============================================================================
- *  АВТОПОЛИВ РАСТЕНИЙ С ЗАЩИТОЙ ОТ ПРОТЕЧКИ И УПРАВЛЕНИЕМ ФИТОЛАМПОЙ
- * ============================================================================
- *
- *  Особенности:
- *   - Измерение влажности почвы раз в 30 секунд, вывод в процентах.
- *   - Автоматический полив: если почва сухая (<300) и вода есть – помпа включается.
- *   - Максимальное время полива – 5 секунд.
- *   - Аварийная остановка при отсутствии воды или срабатывании датчика протечки.
- *   - Красный светодиод: горит постоянно при отсутствии воды,
- *     мигает при протечке.
- *   - Кнопка управляет фитолампой (реле), антидребезг.
- *   - Все события выводятся в Serial-монитор.
- *
- *  Автор: [Ваше имя]
- *  Дата:  28.03.2026
- */
+============================================================================
+ SMART WATERING + TROYKA WiFi (AT-mode)
+ Управление помпой и светом полностью через сервер (GET/POST).
+ Интервал опроса: 30 сек (настраивается).
+ Убраны: кнопка, пьезо, локальная логика автополива.
+============================================================================
+*/
+#include <SoftwareSerial.h>
+
+// === КОНФИГУРАЦИЯ СЕТИ И СЕРВЕРА ===
+const char* WIFI_SSID     = "AS47";
+const char* WIFI_PASS     = "240490398002";
+const char* SERVER_IP     = "213.171.25.91";
+const char* MACHINE_NAME  = "smart-watering";
+const int   DEVICE_ID     = 2;
+const char* HUMAN_NAME    = "second";
+
+// Интервал обращения к серверу (мс)
+const unsigned long SERVER_INTERVAL = 30000; 
+
+// === ПИНЫ ===
+// WiFi модуль (SoftwareSerial)
+SoftwareSerial wifiSerial(5, 4); // RX=D5, TX=D4 (не меняйте, это стандарт Troyka WiFi)
+
+// Датчики и исполнительные устройства
+const int PIN_SOIL      = A5;  // Аналоговый датчик влажности
+const int PIN_LEAK      = 2;   // Цифровой датчик протечки (LOW=протечка)
+const int PIN_WATER     = 7;   // Цифровой датчик уровня воды (LOW=вода есть)
+const int PIN_PUMP      = 11;   // Реле помпы (перенесено с D11 во избежание конфликта с TX)
+const int PIN_LIGHT     = 12;   // Реле света
+const int PIN_LED       = 10;   // Красный LED индикатор (перенесён с D10)
+
+// === СОСТОЯНИЕ СИСТЕМЫ ===
+unsigned long lastServerCheck = 0;
+bool leakActive = false;
+bool waterPresent = false;
+int  soilRaw = 0;
+bool wifiConnected = false;
+
+// === ПРОТОТИПЫ ===
+void setupPins();
+bool ensureWiFi();
+bool httpExchange(bool isPost, const String& payload, String& outResponse);
+String buildPayload();
+String findJsonValue(const String& json, const String& key); // <-- вынесена
+void parseAndExecute(const String& response);
+void updateIndicators();
+String readWiFiLine(unsigned long timeout);
 
 // ============================================================================
-//  КОНФИГУРАЦИЯ – МЕНЯЙТЕ ЗНАЧЕНИЯ ПОД СВОИ ДАТЧИКИ
+// SETUP / LOOP
 // ============================================================================
-
-// ---- Пины Arduino ----------------------------------------------------------
-const int PIN_BUTTON         = 6;   // кнопка (замыкает на GND)
-const int PIN_PUMP           = 11;  // реле помпы
-const int PIN_WATER_SENSOR   = 7;   // датчик уровня воды (цифровой)
-const int PIN_LAMP_RELAY     = 4;   // реле фитолампы
-const int PIN_RED_LED        = 10;  // красный светодиод
-const int PIN_LEAK_SENSOR    = 2;   // датчик протечки (цифровой)
-const int PIN_SOIL_MOISTURE  = A5;  // датчик влажности почвы (аналоговый)
-
-// ---- Пороги и логика датчиков ----------------------------------------------
-const int SOIL_DRY_THRESHOLD   = 300;   // ниже – сухая почва (включаем полив)
-const int SOIL_WET_THRESHOLD   = 300;   // выше/равно – влажная (останавливаем)
-const int WATER_PRESENT_VALUE  = LOW;   // LOW = вода есть, HIGH = воды нет
-const int LEAK_DETECT_VALUE    = LOW;   // LOW = протечка, HIGH = норма
-
-// ---- Временные интервалы (миллисекунды) ------------------------------------
-const unsigned long MEASURE_INTERVAL    = 30000;   // 30 сек – измерение влажности
-const unsigned long MAX_PUMP_DURATION   = 5000;    // 5 сек – макс. время полива
-const unsigned long DEBOUNCE_DELAY      = 50;      // 50 мс – антидребезг кнопки
-const unsigned long LED_BLINK_INTERVAL  = 500;     // 500 мс – период мигания при протечке
-
-// ============================================================================
-//  ГЛОБАЛЬНЫЕ ПЕРЕМЕННЫЕ – НЕ МЕНЯТЬ БЕЗ ПОНИМАНИЯ
-// ============================================================================
-
-enum SystemState { STATE_IDLE, STATE_WATERING };
-SystemState currentState = STATE_IDLE;
-
-unsigned long lastMeasureTime = 0;
-unsigned long wateringStartTime = 0;
-int lastSoilRaw = 0;                     // последнее сырое значение влажности (0..1023)
-
-// Для кнопки (антидребезг)
-int lastButtonStable = HIGH;
-int lastButtonRaw = HIGH;
-unsigned long lastDebounceTime = 0;
-
-bool lampState = false;                  // состояние фитолампы
-bool leakDetected = false;
-int lastLeakState = HIGH;
-
-// Для мигания светодиода при протечке
-unsigned long lastLedBlinkTime = 0;
-bool ledBlinkState = false;
-
-// ============================================================================
-//  НАСТРОЙКА
-// ============================================================================
-
 void setup() {
-  // Конфигурация пинов
-  pinMode(PIN_BUTTON, INPUT_PULLUP);
-  pinMode(PIN_PUMP, OUTPUT);
-  pinMode(PIN_WATER_SENSOR, INPUT);
-  pinMode(PIN_LAMP_RELAY, OUTPUT);
-  pinMode(PIN_RED_LED, OUTPUT);
-  pinMode(PIN_LEAK_SENSOR, INPUT_PULLUP);
-
-  // Начальное состояние выходов
-  digitalWrite(PIN_PUMP, LOW);
-  digitalWrite(PIN_LAMP_RELAY, LOW);
-  digitalWrite(PIN_RED_LED, LOW);
-
-  // Инициализация Serial
   Serial.begin(9600);
-  Serial.println("=== Система автополива запущена ===");
-
-  // Первое измерение влажности будет выполнено сразу в loop()
-  lastMeasureTime = millis() - MEASURE_INTERVAL;
-
-  // Проверка датчика протечки при старте
-  int leakRaw = digitalRead(PIN_LEAK_SENSOR);
-  leakDetected = (leakRaw == LEAK_DETECT_VALUE);
-  lastLeakState = leakRaw;
-  if (leakDetected) {
-    Serial.println("ВНИМАНИЕ: Обнаружена протечка воды! Полив заблокирован.");
-  }
+  Serial.println(F("🚀 Smart Watering + WiFi init..."));
+  
+  setupPins();
+  
+  // Инициализация модуля
+  wifiSerial.begin(9600);
+  delay(1000);
+  wifiSerial.println(F("AT+RST")); delay(1500);
+  wifiSerial.println(F("AT+CWMODE_DEF=1")); delay(500);
+  
+  Serial.println(F("✅ Инициализация завершена. Подключение к WiFi..."));
+  ensureWiFi();
+  
+  lastServerCheck = millis();
 }
-
-// ============================================================================
-//  ОСНОВНОЙ ЦИКЛ
-// ============================================================================
 
 void loop() {
-  // 1. Проверка протечки (высший приоритет)
-  checkLeak();
+  // 1. Чтение датчиков
+  soilRaw     = analogRead(PIN_SOIL);
+  leakActive  = (digitalRead(PIN_LEAK) == LOW);
+  waterPresent = (digitalRead(PIN_WATER) == LOW);
 
-  // 2. Обработка кнопки (фитолампа)
-  handleButton();
+  // 2. Индикация
+  updateIndicators();
 
-  // 3. Управление красным светодиодом (мигает при протечке, иначе индикатор воды)
-  updateRedLed();
-
-  // 4. Автоматический полив (только если нет протечки)
-  if (!leakDetected) {
-    autoWatering();
-  }
-
-  // 5. Если полив активен – мониторим условия остановки
-  if (currentState == STATE_WATERING) {
-    checkWateringStop();
-  }
-}
-
-// ============================================================================
-//  ФУНКЦИИ ДЛЯ ДАТЧИКОВ И ИСПОЛНИТЕЛЬНЫХ УСТРОЙСТВ
-// ============================================================================
-
-/**
- * Проверка датчика протечки.
- * При обнаружении протечки блокируется полив, при устранении – разблокируется.
- */
-void checkLeak() {
-  int leakRaw = digitalRead(PIN_LEAK_SENSOR);
-  if (leakRaw != lastLeakState) {
-    lastLeakState = leakRaw;
-    if (leakRaw == LEAK_DETECT_VALUE) {
-      leakDetected = true;
-      Serial.println("ВНИМАНИЕ: Обнаружена протечка воды! Полив заблокирован.");
-      if (currentState == STATE_WATERING) {
-        stopWatering("Аварийная остановка из-за протечки.");
+  // 3. Цикл связи с сервером
+  if (millis() - lastServerCheck >= SERVER_INTERVAL) {
+    lastServerCheck = millis();
+    Serial.println("\n📡 --- Server Cycle ---");
+    
+    if (ensureWiFi()) {
+      String payload = buildPayload();
+      String postResp = "";
+      if (httpExchange(true, payload, postResp)) {
+        Serial.println(F("✅ POST: Данные отправлены"));
+        String getResp = "";
+        if (httpExchange(false, "", getResp)) {
+          Serial.println(F("📥 GET: Получены команды"));
+          parseAndExecute(getResp);
+        }
+      } else {
+        Serial.println(F("❌ Ошибка связи с сервером"));
       }
     } else {
-      leakDetected = false;
-      Serial.println("Протечка устранена. Полив разблокирован.");
+      Serial.println(F("⚠️ WiFi отключен. Пропуск цикла."));
     }
   }
 }
 
-/**
- * Обработка кнопки с антидребезгом.
- * Нажатие переключает фитолампу.
- */
-void handleButton() {
-  int raw = digitalRead(PIN_BUTTON);
-  if (raw != lastButtonRaw) {
-    lastDebounceTime = millis();
+// ============================================================================
+// ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ
+// ============================================================================
+void setupPins() {
+  pinMode(PIN_LEAK, INPUT_PULLUP);
+  pinMode(PIN_WATER, INPUT_PULLUP);
+  pinMode(PIN_PUMP, OUTPUT);
+  pinMode(PIN_LIGHT, OUTPUT);
+  pinMode(PIN_LED, OUTPUT);
+  digitalWrite(PIN_PUMP, LOW);
+  digitalWrite(PIN_LIGHT, LOW);
+  digitalWrite(PIN_LED, LOW);
+}
+
+bool ensureWiFi() {
+  if (wifiConnected) return true;
+  
+  Serial.print(F("📶 Подключение к ")); Serial.println(WIFI_SSID);
+  wifiSerial.print(F("AT+CWJAP_DEF=\"")); wifiSerial.print(WIFI_SSID); 
+  wifiSerial.print(F("\",\"")); wifiSerial.print(WIFI_PASS); wifiSerial.println(F("\""));
+  
+  String resp = readWiFiLine(15000);
+  if (resp.indexOf("OK") >= 0) {
+    wifiConnected = true;
+    Serial.println(F("✅ WiFi подключён"));
+    return true;
   }
-  if ((millis() - lastDebounceTime) > DEBOUNCE_DELAY) {
-    if (raw != lastButtonStable) {
-      lastButtonStable = raw;
-      if (lastButtonStable == LOW) {
-        toggleLamp();
-      }
+  Serial.println(F("❌ Ошибка WiFi"));
+  return false;
+}
+
+bool httpExchange(bool isPost, const String& payload, String& outResponse) {
+  // Открываем TCP
+  wifiSerial.println(F("AT+CIPSTART=\"TCP\",\"213.171.25.91\",80"));
+  String s = readWiFiLine(3000);
+  if (s.indexOf("CONNECT") < 0 && s.indexOf("ALREADY") < 0) return false;
+
+  // Формируем запрос
+  String req;
+  if (isPost) {
+    req = F("POST /"); req += MACHINE_NAME; req += "/"; req += DEVICE_ID; req += F("/post_endpoint HTTP/1.1\r\n");
+    req += F("Host: "); req += SERVER_IP; req += "\r\n";
+    req += F("Content-Type: application/json\r\n");
+    req += F("Content-Length: "); req += payload.length(); req += "\r\n";
+    req += F("Connection: close\r\n\r\n");
+    req += payload;
+  } else {
+    req = F("GET /"); req += MACHINE_NAME; req += "/"; req += DEVICE_ID; req += F("/get_endpoint HTTP/1.1\r\n");
+    req += F("Host: "); req += SERVER_IP; req += "\r\n";
+    req += F("Connection: close\r\n\r\n");
+  }
+
+  // Отправляем
+  wifiSerial.print(F("AT+CIPSEND=")); wifiSerial.println(req.length());
+  delay(300);
+  s = readWiFiLine(1000);
+  if (s.indexOf(">") < 0) {
+    wifiSerial.println(F("AT+CIPCLOSE")); return false;
+  }
+  
+  wifiSerial.print(req);
+  
+  // Ждём ответ
+  outResponse = "";
+  unsigned long t0 = millis();
+  while (millis() - t0 < 5000) {
+    while (wifiSerial.available()) {
+      outResponse += (char)wifiSerial.read();
+      if (outResponse.length() > 1024) break;
+    }
+    if (outResponse.indexOf("200 OK") >= 0 || outResponse.indexOf("SEND OK") >= 0) break;
+  }
+
+  wifiSerial.println(F("AT+CIPCLOSE"));
+  delay(200);
+  
+  return outResponse.indexOf("200") >= 0;
+}
+
+String buildPayload() {
+  int soilPercent = map(soilRaw, 0, 1023, 0, 100);
+  soilPercent = constrain(soilPercent, 0, 100);
+  int leakVal   = leakActive ? 1 : 0;
+  int waterVal  = waterPresent ? 1 : 0;
+  
+  String p = F("{\"soil moisture\":"); p += soilPercent;
+  p += F(",\"leak\":"); p += leakVal;
+  p += F(",\"water reservoir\":"); p += waterVal;
+  p += F(",\"human_name\":\""); p += HUMAN_NAME; p += F("\"}");
+  return p;
+}
+
+// ============================================================================
+// ✅ ВЫНЕСЕННАЯ ФУНКЦИЯ ПАРСИНГА (глобальная, не внутри другой!)
+// ============================================================================
+String findJsonValue(const String& json, const String& key) {
+  String searchKey = "\"" + key + "\":\"";
+  int keyIndex = json.indexOf(searchKey);
+  if (keyIndex < 0) return "";
+  
+  int valueStart = keyIndex + searchKey.length();
+  int valueEnd = json.indexOf('"', valueStart);
+  if (valueEnd <= valueStart) return "";
+  
+  String result = json.substring(valueStart, valueEnd);
+  result.toLowerCase();
+  return result;
+}
+
+// ============================================================================
+void parseAndExecute(const String& resp) {
+  String lightCmd = findJsonValue(resp, "light");
+  String pumpCmd  = findJsonValue(resp, "pump");
+
+  if (lightCmd.length() > 0) {
+    bool turnOn = (lightCmd == "on" || lightCmd == "true" || lightCmd == "1");
+    digitalWrite(PIN_LIGHT, turnOn ? HIGH : LOW);
+    Serial.print(F("💡 Light: ")); 
+    Serial.println(turnOn ? F("ON") : F("OFF"));
+  }
+  
+  if (pumpCmd.length() > 0) {
+    bool reqOn = (pumpCmd == "on" || pumpCmd == "true" || pumpCmd == "1");
+    if (reqOn && (leakActive || !waterPresent)) {
+      digitalWrite(PIN_PUMP, LOW);
+      Serial.println(F("⚠️ Pump BLOCKED (leak/no water)!"));
+    } else {
+      digitalWrite(PIN_PUMP, reqOn ? HIGH : LOW);
+      Serial.print(F("💧 Pump: ")); 
+      Serial.println(reqOn ? F("ON") : F("OFF"));
     }
   }
-  lastButtonRaw = raw;
 }
 
-/**
- * Переключение фитолампы.
- */
-void toggleLamp() {
-  lampState = !lampState;
-  digitalWrite(PIN_LAMP_RELAY, lampState ? HIGH : LOW);
-  Serial.print("Фитолампа ");
-  Serial.println(lampState ? "включена" : "выключена");
-}
-
-/**
- * Управление красным светодиодом:
- * - если протечка – мигает;
- * - иначе горит постоянно при отсутствии воды, выключен при наличии воды.
- */
-void updateRedLed() {
-  bool waterPresent = (digitalRead(PIN_WATER_SENSOR) == WATER_PRESENT_VALUE);
-
-  if (leakDetected) {
-    // Мигание при протечке
-    if (millis() - lastLedBlinkTime >= LED_BLINK_INTERVAL) {
-      lastLedBlinkTime = millis();
-      ledBlinkState = !ledBlinkState;
-      digitalWrite(PIN_RED_LED, ledBlinkState ? HIGH : LOW);
+void updateIndicators() {
+  if (leakActive) {
+    static unsigned long blinkT = 0;
+    static bool state = false;
+    if (millis() - blinkT >= 500) {
+      blinkT = millis();
+      state = !state;
+      digitalWrite(PIN_LED, state ? HIGH : LOW);
     }
   } else {
-    // Обычный режим: индикатор отсутствия воды
-    digitalWrite(PIN_RED_LED, waterPresent ? LOW : HIGH);
-    // Сброс мигающих переменных
-    ledBlinkState = false;
-    lastLedBlinkTime = 0;
+    digitalWrite(PIN_LED, waterPresent ? LOW : HIGH);
   }
 }
 
-/**
- * Автоматический полив: измерение влажности раз в 30 секунд
- * и запуск полива, если почва сухая и вода есть.
- */
-void autoWatering() {
-  if (millis() - lastMeasureTime >= MEASURE_INTERVAL) {
-    lastMeasureTime = millis();
-    measureAndControl();
-  }
-}
-
-/**
- * Измерение влажности и принятие решения о поливе.
- */
-void measureAndControl() {
-  bool waterPresent = (digitalRead(PIN_WATER_SENSOR) == WATER_PRESENT_VALUE);
-  lastSoilRaw = readSoilMoisture();   // обновляем глобальное значение
-
-  // Вывод влажности в процентах
-  int percent = map(lastSoilRaw, 0, 1023, 0, 100);
-  Serial.print("Влажность почвы: ");
-  Serial.print(percent);
-  Serial.print("% (");
-  Serial.print(lastSoilRaw);
-  Serial.println(")");
-  Serial.print("Наличие воды: ");
-  Serial.println(waterPresent ? "есть" : "нет");
-
-  if (currentState == STATE_IDLE) {
-    if (waterPresent && lastSoilRaw < SOIL_DRY_THRESHOLD) {
-      startWatering();
-    } else {
-      if (!waterPresent) {
-        Serial.println("Нет воды, полив невозможен.");
-      } else if (lastSoilRaw >= SOIL_DRY_THRESHOLD) {
-        Serial.println("Почва достаточно влажная, полив не требуется.");
-      }
+String readWiFiLine(unsigned long timeout) {
+  String line;
+  unsigned long t0 = millis();
+  while (millis() - t0 < timeout) {
+    while (wifiSerial.available()) {
+      char c = wifiSerial.read();
+      if (c == '\r' || c == '\n') return line;
+      line += c;
+      if (line.length() > 128) return line;
     }
   }
-  // Случай, если полив идёт дольше 30 сек (теоретически маловероятно, но для надёжности)
-  else if (currentState == STATE_WATERING) {
-    if (!waterPresent || lastSoilRaw >= SOIL_WET_THRESHOLD) {
-      stopWatering(!waterPresent ?
-        "Вода закончилась (проверка по таймеру)" :
-        "Влажность достигла порога (проверка по таймеру)");
-    }
-  }
-}
-
-/**
- * Включение помпы.
- */
-void startWatering() {
-  if (leakDetected) {
-    Serial.println("Невозможно включить помпу из-за протечки!");
-    return;
-  }
-  currentState = STATE_WATERING;
-  wateringStartTime = millis();
-  digitalWrite(PIN_PUMP, HIGH);
-  Serial.println("Полив начат (макс. 5 сек).");
-}
-
-/**
- * Остановка помпы с указанием причины.
- */
-void stopWatering(const char* reason) {
-  digitalWrite(PIN_PUMP, LOW);
-  currentState = STATE_IDLE;
-  Serial.println(reason);
-}
-
-/**
- * Проверка условий остановки полива во время его работы.
- * Вызывается из основного цикла.
- */
-void checkWateringStop() {
-  bool waterPresent = (digitalRead(PIN_WATER_SENSOR) == WATER_PRESENT_VALUE);
-
-  // Нет воды
-  if (!waterPresent) {
-    stopWatering("Вода закончилась! Помпа отключена.");
-    return;
-  }
-  // Превышение времени
-  if (millis() - wateringStartTime >= MAX_PUMP_DURATION) {
-    stopWatering("Достигнуто максимальное время полива (5 сек).");
-    return;
-  }
-  // Достигнута влажность (по последнему измерению)
-  if (lastSoilRaw >= SOIL_WET_THRESHOLD) {
-    stopWatering("Почва стала влажной, полив остановлен.");
-  }
-}
-
-/**
- * Чтение аналогового датчика влажности с усреднением.
- * Возвращает сырое значение 0..1023.
- */
-int readSoilMoisture() {
-  const int samples = 5;
-  long sum = 0;
-  for (int i = 0; i < samples; i++) {
-    sum += analogRead(PIN_SOIL_MOISTURE);
-    delay(1);             // короткая задержка для стабильности
-  }
-  return sum / samples;
+  return line;
 }
