@@ -3,7 +3,7 @@
  
 // создаём объект для работы с программным Serial
 // и передаём ему пины TX и RX
-SoftwareSerial mySerial(8, 9);
+SoftwareSerial mySerial(4, 5);
  
 // serial-порт к которому подключён Wi-Fi модуль
 #define WIFI_SERIAL    mySerial
