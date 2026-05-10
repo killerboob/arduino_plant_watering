@@ -230,89 +230,34 @@ void sendPostData(int soil_moisture, int leak, int water_reservoir) {
 // {"light":"true","pump":"true"}
 
 void getServerCommand() {
-  if (!wifiConnected) return;
-
-  Serial.println(F("GET commands..."));
-
+  Serial.println(F("\n=== GET TEST ==="));
+  
   // Очищаем буфер
   while (WIFI_SERIAL.available()) WIFI_SERIAL.read();
   rxIndex = 0;
   
-  // 1. Открываем соединение
+  // Открываем соединение
   WIFI_SERIAL.println("AT+CIPSTART=\"TCP\",\"213.171.25.91\",80");
   delay(1000);
   
-  // 2. GET запрос
-  const char* getRequest = "GET /smart-watering/2/get_endpoint HTTP/1.0\r\nHost: 213.171.25.91\r\n\r\n";
-  int reqLen = strlen(getRequest);
+  // Отправляем GET запрос (как есть, без затей)
+  WIFI_SERIAL.println("GET /smart-watering/2/get_endpoint HTTP/1.0");
+  WIFI_SERIAL.println("Host: 213.171.25.91");
+  WIFI_SERIAL.println();
+  WIFI_SERIAL.println();
   
-  // 3. CIPSEND
-  WIFI_SERIAL.print("AT+CIPSEND=");
-  WIFI_SERIAL.println(reqLen);
+  Serial.println(F("Request sent, waiting 3 seconds..."));
+  delay(3000);
   
-  // 4. Ждём ">"
-  unsigned long start = millis();
-  while (millis() - start < 2000) {
-    if (WIFI_SERIAL.available() && WIFI_SERIAL.read() == '>') break;
+  // Выводим ВСЁ что пришло
+  Serial.println(F("=== RAW RESPONSE ==="));
+  while (WIFI_SERIAL.available()) {
+    char c = WIFI_SERIAL.read();
+    Serial.write(c);  // выводим как есть, включая спецсимволы
   }
+  Serial.println(F("\n=== END OF RESPONSE ==="));
   
-  // 5. Отправляем GET
-  WIFI_SERIAL.print(getRequest);
-  Serial.println(F("GET sent"));
-  
-  // 6. Ждём ответ
-  delay(1000);
-  
-  // 7. Читаем ВСЁ что пришло
-  start = millis();
-  while (millis() - start < 3000) {
-    while (WIFI_SERIAL.available()) {
-      char c = WIFI_SERIAL.read();
-      if (rxIndex < sizeof(rxBuffer) - 1) {
-        rxBuffer[rxIndex++] = c;
-        rxBuffer[rxIndex] = '\0';
-      }
-    }
-  }
-  
-  // 8. Ищем JSON в буфере (между { и })
-  char* jsonStart = strchr(rxBuffer, '{');
-  char* jsonEnd = strrchr(rxBuffer, '}');
-  
-  if (jsonStart && jsonEnd && jsonEnd > jsonStart) {
-    // Копируем только JSON часть
-    int jsonLen = jsonEnd - jsonStart + 1;
-    char json[64];
-    strncpy(json, jsonStart, jsonLen);
-    json[jsonLen] = '\0';
-    
-    Serial.print(F("JSON: "));
-    Serial.println(json);
-    
-    // Парсим
-    bool light = (strstr(json, "\"light\":\"true\"") != NULL);
-    bool pump  = (strstr(json, "\"pump\":\"true\"") != NULL);
-    
-    Serial.print(F("light="));
-    Serial.print(light);
-    Serial.print(F(" pump="));
-    Serial.println(pump);
-    
-    setLight(light);
-    setPump(pump);
-  } else {
-    Serial.print(F("Raw response: "));
-    // Печатаем первые 50 символов
-    for(int i = 0; i < 50 && rxBuffer[i]; i++) {
-      if(rxBuffer[i] >= 32 && rxBuffer[i] < 127) 
-        Serial.print(rxBuffer[i]);
-      else 
-        Serial.print('?');
-    }
-    Serial.println();
-  }
-  
-  // Закрываем
+  // Закрываем соединение
   WIFI_SERIAL.println("AT+CIPCLOSE");
   delay(500);
 }
