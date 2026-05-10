@@ -36,8 +36,9 @@ const char* SERVER_IP     = "213.171.25.91";
 // 10000 = 10 секунд
 const int TELEMETRY_INTERVAL_MS = 10000;
 
-// Человеческое имя устройства (отправляем в POST)
-const char* DEVICE_HUMAN_NAME = "second";
+// ID устройства и имя
+const int    DEVICE_ID         = 2;        // ID устройства (device_id)
+const char* DEVICE_HUMAN_NAME = "second";   // Человеческое имя устройства
 
 // =============================================================================
 // ГЛОБАЛЬНЫЕ ПЕРЕМЕННЫЕ (минимум для экономии памяти)
@@ -47,19 +48,13 @@ unsigned long lastCheckTime = 0;  // Когда последний раз отп
 bool            wifiConnected   = false; // Подключен ли WiFi сейчас
 
 // Буферы для AT команд (ESP8266 общается текстовыми командами)
-char txBuffer[128];  // Для отправки команд в WiFi модуль
-char rxBuffer[256];  // Для получения ответов от WiFi модуля
+char txBuffer[256];  // Для отправки команд в WiFi модуль
+char rxBuffer[512];  // Для получения ответов от WiFi модуля (увеличен для полного HTTP)
 int  rxIndex = 0;    // Текущая позиция в буфере приёма
 
 // =============================================================================
 // ФУНКЦИЯ: Подключение к WiFi сети
 // =============================================================================
-// Что делает:
-// 1. Устанавливает режим работы модуля (Station = клиент)
-// 2. Отключает режим доступа (не создаёт свою сеть)
-// 3. Подключается к указанной сети (WIFI_SSID/WIFI_PASS)
-//
-// Результат: wifiConnected = true если успешно, false если нет
 
 void wifiConnect() {
   Serial.println(F("WiFi connecting..."));
@@ -117,29 +112,18 @@ bool waitForResponse(const char* expected, int timeout) {
   return false;
 }
 
-// Проверяет есть ли строка в последнем ответе
-bool checkResponse(const char* expected) {
-  return strstr(rxBuffer, expected) != NULL;
-}
-
 // =============================================================================
 // ФУНКЦИИ ДАТЧИКОВ (ЗАГЛУШКИ - пока возвращают фиксированные значения)
 // =============================================================================
 
-// Возвращает влажность почвы (0-100%)
-// СПОСОБНОСТЬ: Здесь будет реальный датчик (например, с аналогового пина)
 int readSoilMoisture() {
   return 75;  // ЗАГЛУШКА: тестовое значение 75%
 }
 
-// Возвращает состояние протечки (0 = нет, 1 = есть)
-// СПОСОБНОСТЬ: Здесь будет датчик протечки
 int readLeak() {
   return 0;   // ЗАГЛУШКА: протечки нет
 }
 
-// Возвращает уровень воды в баке (0 = пусто, 1 = есть)
-// СПОСОБНОСТЬ: Здесь будет датчик уровня
 int readWaterReservoir() {
   return 0;   // ЗАГЛУШКА: бак пуст (тест)
 }
@@ -148,16 +132,12 @@ int readWaterReservoir() {
 // ФУНКЦИИ ИСПОЛНЕНИЯ КОМАНД
 // =============================================================================
 
-// Вкл/выкл насос
-// СПОСОБНОСТЬ: Здесь будет digitalWrite на пин реле насоса
 void setPump(bool state) {
   Serial.print(F("Pump command: "));
   Serial.println(state ? F("ON") : F("OFF"));
   // digitalWrite(PUMP_PIN, state ? HIGH : LOW);
 }
 
-// Вкл/выкл свет
-// СПОСОБНОСТЬ: Здесь будет digitalWrite на пин реле света
 void setLight(bool state) {
   Serial.print(F("Light command: "));
   Serial.println(state ? F("ON") : F("OFF"));
@@ -167,102 +147,71 @@ void setLight(bool state) {
 // =============================================================================
 // ФУНКЦИЯ: Отправка данных на сервер (POST запрос)
 // =============================================================================
-// Что делает:
-// 1. Открывает TCP соединение с сервером
-// 2. Формирует JSON с данными датчиков
-// 3. Отправляет POST запрос
-// 4. Закрывает соединение
-//
-// Формат данных:
-// {"soil moisture":75,"leak":0,"water reservoir":0}
 
 void sendPostData(int soil_moisture, int leak, int water_reservoir) {
-  if (!wifiConnected) return;
+  if (!wifiConnected) {
+    Serial.println(F("Not connected to WiFi"));
+    return;
+  }
 
   Serial.println(F("POST data..."));
 
-  // 1. Открываем TCP соединение на порт 80
-  snprintf(txBuffer, sizeof(txBuffer), "AT+CIPSTART=\"TCP\",\"%s\",80", SERVER_IP);
-  sendATCommand(txBuffer, 5000);
+  // 1. Закрываем старое соединение если было
+  sendATCommand("AT+CIPCLOSE", 1000);
+  delay(500);
 
-  // 2. Формируем JSON с данными
-  char json[128];
+  // 2. Открываем TCP соединение на порт 80
+  snprintf(txBuffer, sizeof(txBuffer), "AT+CIPSTART=\"TCP\",\"%s\",80", SERVER_IP);
+  if (!waitForResponse("CONNECT", 5000)) {
+    Serial.println(F("Failed to connect"));
+    return;
+  }
+
+  // 3. Формируем JSON с данными
+  char json[200];
   snprintf(json, sizeof(json),
     "{\"soil moisture\":%d,\"leak\":%d,\"water reservoir\":%d,\"human_name\":\"%s\"}",
     soil_moisture, leak, water_reservoir, DEVICE_HUMAN_NAME);
 
   int jsonLen = strlen(json);
 
-  // 3. Формируем полный HTTP POST запрос (как делает requests.post в Python)
-  char httpRequest[256];
+  // 4. Формируем полный HTTP POST запрос
+  char httpRequest[512];
   snprintf(httpRequest, sizeof(httpRequest),
-    "POST /smart-watering/2/post_endpoint HTTP/1.0\r\n"
+    "POST /smart-watering/%d/post_endpoint HTTP/1.1\r\n"
     "Host: %s\r\n"
     "Content-Type: application/json\r\n"
     "Content-Length: %d\r\n"
+    "Connection: close\r\n"
     "\r\n"
     "%s",
-    SERVER_IP, jsonLen, json);
+    DEVICE_ID, SERVER_IP, jsonLen, json);
 
   int reqLen = strlen(httpRequest);
+  Serial.print(F("Request length: "));
+  Serial.println(reqLen);
 
-  // 4. Отправляем запрос
+  // 5. Отправляем команду CIPSEND
   snprintf(txBuffer, sizeof(txBuffer), "AT+CIPSEND=%d", reqLen);
-  sendATCommand(txBuffer, 2000);
+  WIFI_SERIAL.println(txBuffer);
 
-  if (waitForResponse(">", 2000)) {
-    WIFI_SERIAL.print(httpRequest);
-    Serial.println(F("POST sent"));
+  // 6. Ждём ">" от модуля
+  if (!waitForResponse(">", 3000)) {
+    Serial.println(F("Timeout waiting for >"));
+    sendATCommand("AT+CIPCLOSE", 1000);
+    return;
   }
 
-  // 5. Закрываем соединение
-  sendATCommand("AT+CIPCLOSE", 2000);
-}
+  // 7. Отправляем сам HTTP запрос
+  WIFI_SERIAL.print(httpRequest);
+  Serial.println(F("POST sent successfully"));
 
-// =============================================================================
-// ФУНКЦИЯ: Получение команд с сервера (GET запрос)
-// =============================================================================
-// Что делает:
-// 1. Открывает TCP соединение с сервером
-// 2. Отправляет GET запрос
-// 3. Читает ответ (JSON с командами)
-// 4. Парсит ответ на light и pump
-// 5. Вызывает setLight() и setPump() с полученными значениями
-//
-// Формат ответа_SERVER:
-// {"light":"true","pump":"true"}
+  // 8. Ждём ответа от сервера
+  delay(2000);
 
-void getServerCommand() {
-  if (!wifiConnected) return;
-
-  Serial.println(F("GET commands..."));
-
-  // 1. Открываем TCP соединение
-  snprintf(txBuffer, sizeof(txBuffer), "AT+CIPSTART=\"TCP\",\"%s\",80", SERVER_IP);
-  sendATCommand(txBuffer, 5000);
-
-  // 2. Формируем GET запрос
-  snprintf(txBuffer, sizeof(txBuffer),
-    "GET /smart-watering/2/get_endpoint HTTP/1.0\r\nHost: %s\r\n\r\n",
-    SERVER_IP);
-
-  int reqLen = strlen(txBuffer);
-  snprintf(txBuffer, sizeof(txBuffer), "AT+CIPSEND=%d", reqLen);
-  sendATCommand(txBuffer, 2000);
-
-  // 3. Отправляем запрос
-  if (waitForResponse(">", 2000)) {
-    WIFI_SERIAL.print(txBuffer);
-  }
-
-  // 4. Ждём ответ от сервера и читаем его
-  delay(1000);  // Даём время на получение полного ответа
-
-  // Очищаем буфер перед чтением
+  // 9. Читаем ответ
   rxIndex = 0;
-
-  // Читаем всё что пришло
-  unsigned long readTimeout = millis() + 2000;
+  unsigned long readTimeout = millis() + 3000;
   while (millis() < readTimeout) {
     while (WIFI_SERIAL.available()) {
       char c = WIFI_SERIAL.read();
@@ -274,96 +223,158 @@ void getServerCommand() {
     delay(10);
   }
 
-  // 5. Ищем начало JSON (пропускаем HTTP заголовки)
-  // JSON начинается после двойного переноса строки \r\n\r\n
-  char* jsonStart = strstr(rxBuffer, "\r\n\r\n");
-  if (jsonStart) {
-    jsonStart += 4;  // Пропускаем \r\n\r\n
-    // Сдвигаем JSON в начало буфера
-    int jsonLen = strlen(jsonStart);
-    memmove(rxBuffer, jsonStart, jsonLen + 1);
-  }
-
-  // 6. Парсим JSON ответ (ручной парсинг без библиотек)
-  bool light = false;
-  bool pump  = false;
-
-  Serial.print(F("Response: "));
+  Serial.print(F("Server response: "));
   Serial.println(rxBuffer);
 
-  char* lightPos = strstr(rxBuffer, "\"light\"");
-  if (lightPos && strstr(lightPos, "true")) {
-    light = true;
-  }
-
-  char* pumpPos = strstr(rxBuffer, "\"pump\"");
-  if (pumpPos && strstr(pumpPos, "true")) {
-    pump = true;
-  }
-
-  // Выводим что получили
-  Serial.print(F("Parsed: light="));
-  Serial.print(light ? F("true") : F("false"));
-  Serial.print(F(", pump="));
-  Serial.println(pump ? F("true") : F("false"));
-
-  // 7. Выполняем команды
-  setLight(light);
-  setPump(pump);
-
-  // 8. Закрываем соединение
+  // 10. Закрываем соединение
   sendATCommand("AT+CIPCLOSE", 2000);
+  delay(500);
 }
 
 // =============================================================================
-// ФУНКЦИЯ: Основной цикл работы (вызывается каждые 10 секунд)
+// ФУНКЦИЯ: Получение команд с сервера (GET запрос)
 // =============================================================================
-// Последовательность:
-// 1. Считать все датчики
-// 2. Отправить POST с данными на сервер
-// 3. Получить GET запросом команды с сервера
-// 4. Выполнить полученные команды
+
+void getServerCommand() {
+  if (!wifiConnected) return;
+
+  Serial.println(F("GET commands..."));
+
+  // 1. Закрываем старое соединение
+  sendATCommand("AT+CIPCLOSE", 1000);
+  delay(500);
+
+  // 2. Открываем TCP соединение
+  snprintf(txBuffer, sizeof(txBuffer), "AT+CIPSTART=\"TCP\",\"%s\",80", SERVER_IP);
+  if (!waitForResponse("CONNECT", 5000)) {
+    Serial.println(F("Failed to connect for GET"));
+    return;
+  }
+
+  // 3. Формируем GET запрос в ОТДЕЛЬНОЙ строке
+  char getRequest[150];
+  snprintf(getRequest, sizeof(getRequest),
+    "GET /smart-watering/%d/get_endpoint HTTP/1.1\r\n"
+    "Host: %s\r\n"
+    "Connection: close\r\n"
+    "\r\n",
+    DEVICE_ID, SERVER_IP);
+
+  int reqLen = strlen(getRequest);
+
+  // 4. Отправляем команду CIPSEND
+  snprintf(txBuffer, sizeof(txBuffer), "AT+CIPSEND=%d", reqLen);
+  WIFI_SERIAL.println(txBuffer);
+
+  // 5. Ждём ">"
+  if (!waitForResponse(">", 3000)) {
+    Serial.println(F("Timeout waiting for >"));
+    sendATCommand("AT+CIPCLOSE", 1000);
+    return;
+  }
+
+  // 6. Отправляем GET запрос (НЕ txBuffer, а getRequest!)
+  WIFI_SERIAL.print(getRequest);
+  Serial.println(F("GET request sent"));
+
+  // 7. Ждём и читаем ответ
+  delay(1000);
+
+  rxIndex = 0;
+  unsigned long readTimeout = millis() + 3000;
+  while (millis() < readTimeout) {
+    while (WIFI_SERIAL.available()) {
+      char c = WIFI_SERIAL.read();
+      if (rxIndex < sizeof(rxBuffer) - 1) {
+        rxBuffer[rxIndex++] = c;
+        rxBuffer[rxIndex] = '\0';
+      }
+    }
+    delay(10);
+  }
+
+  Serial.print(F("RAW response: "));
+  Serial.println(rxBuffer);
+
+  // 8. Ищем JSON (после \r\n\r\n)
+  char* jsonStart = strstr(rxBuffer, "\r\n\r\n");
+  if (jsonStart) {
+    jsonStart += 4;
+    Serial.print(F("JSON: "));
+    Serial.println(jsonStart);
+
+    // 9. Парсим команды
+    bool light = false;
+    bool pump = false;
+
+    char* lightPos = strstr(jsonStart, "\"light\"");
+    if (lightPos && strstr(lightPos, "true")) {
+      light = true;
+    }
+
+    char* pumpPos = strstr(jsonStart, "\"pump\"");
+    if (pumpPos && strstr(pumpPos, "true")) {
+      pump = true;
+    }
+
+    Serial.print(F("Parsed: light="));
+    Serial.print(light ? F("ON") : F("OFF"));
+    Serial.print(F(", pump="));
+    Serial.println(pump ? F("ON") : F("OFF"));
+
+    // 10. Выполняем команды
+    setLight(light);
+    setPump(pump);
+  } else {
+    Serial.println(F("No JSON found in response"));
+  }
+
+  // 11. Закрываем соединение
+  sendATCommand("AT+CIPCLOSE", 2000);
+  delay(500);
+}
+
+// =============================================================================
+// ФУНКЦИЯ: Основной цикл работы
+// =============================================================================
 
 void processWiFiCycle() {
-  // 1. Считываем датчики
   int soil_moisture   = readSoilMoisture();
   int leak            = readLeak();
   int water_reservoir = readWaterReservoir();
 
-  // Вывод для отладки в Serial
-  Serial.print(F("Sensors: soil_moisture="));
+  Serial.print(F("Sensors: soil="));
   Serial.print(soil_moisture);
   Serial.print(F(", leak="));
   Serial.print(leak);
-  Serial.print(F(", water_reservoir="));
-  Serial.println(water_reservoir);
+  Serial.print(F(", water="));
+  Serial.print(water_reservoir);
+  Serial.print(F(", name="));
+  Serial.println(DEVICE_HUMAN_NAME);
 
-  // 2. Отправляем данные на сервер
+  // Сначала POST (отправляем данные)
   sendPostData(soil_moisture, leak, water_reservoir);
 
-  // 3. Получаем команды с сервера
+  // Потом GET (получаем команды)
   getServerCommand();
 }
 
 // =============================================================================
-// SETUP и LOOP - точка входа Arduino
+// SETUP и LOOP
 // =============================================================================
 
 void setup() {
-  // Открываем Serial для отладки (9600 baud)
   Serial.begin(9600);
   while (!Serial) { }
   Serial.println(F("=== Arduino WiFi Module ==="));
 
-  // Открываем связь с WiFi модулем (9600 baud)
   WIFI_SERIAL.begin(9600);
 
-  // Подключаемся к WiFi
   wifiConnect();
 }
 
 void loop() {
-  // Получаем данные от WiFi модуля (не блокирующая версия)
+  // Собираем фоновые данные от WiFi модуля
   while (WIFI_SERIAL.available()) {
     char c = WIFI_SERIAL.read();
     if (rxIndex < sizeof(rxBuffer) - 1) {
@@ -372,9 +383,9 @@ void loop() {
     }
   }
 
-  // Проверяем прошли ли 10 секунд с последнего цикла
+  // Проверяем таймер
   if (millis() - lastCheckTime >= TELEMETRY_INTERVAL_MS) {
     lastCheckTime = millis();
-    processWiFiCycle();  // Запускаем полный цикл
+    processWiFiCycle();
   }
 }
