@@ -230,14 +230,27 @@ void sendPostData(int soil_moisture, int leak, int water_reservoir) {
 // {"light":"true","pump":"true"}
 
 void getServerCommand() {
-  // Некоторые прошивки ESP поддерживают AT+HTTPGET
-  WIFI_SERIAL.println("AT+HTTPGET=\"http://213.171.25.91/smart-watering/2/get_endpoint\"");
-  delay(3000);
+  Serial.println(F("=== READ URL ==="));
   
-  // Выводим ответ
+  // Открываем соединение
+  WIFI_SERIAL.println("AT+CIPSTART=\"TCP\",\"213.171.25.91\",80");
+  delay(2000);
+  
+  // Отправляем МИНИМАЛЬНЫЙ запрос (как telnet)
+  WIFI_SERIAL.println("GET /smart-watering/2/get_endpoint HTTP/1.0");
+  WIFI_SERIAL.println();  // пустая строка
+  WIFI_SERIAL.println();  // еще одна пустая
+  
+  delay(2000);
+  
+  // ПРОСТО ВЫВОДИМ ВСЁ ЧТО ПРИШЛО
+  Serial.println(F("=== RAW OUTPUT ==="));
   while(WIFI_SERIAL.available()) {
     Serial.write(WIFI_SERIAL.read());
   }
+  Serial.println(F("\n=== END ==="));
+  
+  WIFI_SERIAL.println("AT+CIPCLOSE");
 }
 // =============================================================================
 // ФУНКЦИЯ: Основной цикл работы (вызывается каждые 10 секунд)
