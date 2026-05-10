@@ -36,6 +36,9 @@ const char* SERVER_IP     = "213.171.25.91";
 // 10000 = 10 секунд
 const int TELEMETRY_INTERVAL_MS = 10000;
 
+// Человеческое имя устройства (отправляем в POST)
+const char* DEVICE_HUMAN_NAME = "second";
+
 // =============================================================================
 // ГЛОБАЛЬНЫЕ ПЕРЕМЕННЫЕ (минимум для экономии памяти)
 // =============================================================================
@@ -185,8 +188,8 @@ void sendPostData(int soil_moisture, int leak, int water_reservoir) {
   // 2. Формируем JSON с данными
   char json[128];
   snprintf(json, sizeof(json),
-    "{\"soil moisture\":%d,\"leak\":%d,\"water reservoir\":%d}",
-    soil_moisture, leak, water_reservoir);
+    "{\"soil moisture\":%d,\"leak\":%d,\"water reservoir\":%d,\"human_name\":\"%s\"}",
+    soil_moisture, leak, water_reservoir, DEVICE_HUMAN_NAME);
 
   int jsonLen = strlen(json);
 
@@ -247,16 +250,46 @@ void getServerCommand() {
   snprintf(txBuffer, sizeof(txBuffer), "AT+CIPSEND=%d", reqLen);
   sendATCommand(txBuffer, 2000);
 
-  // 3. Отправляем запрос и ждём ответ
+  // 3. Отправляем запрос
   if (waitForResponse(">", 2000)) {
     WIFI_SERIAL.print(txBuffer);
   }
 
-  delay(500);  // Даём время на получение ответа
+  // 4. Ждём ответ от сервера и читаем его
+  delay(1000);  // Даём время на получение полного ответа
 
-  // 4. Парсим JSON ответ (ручной парсинг без библиотек)
+  // Очищаем буфер перед чтением
+  rxIndex = 0;
+
+  // Читаем всё что пришло
+  unsigned long readTimeout = millis() + 2000;
+  while (millis() < readTimeout) {
+    while (WIFI_SERIAL.available()) {
+      char c = WIFI_SERIAL.read();
+      if (rxIndex < sizeof(rxBuffer) - 1) {
+        rxBuffer[rxIndex++] = c;
+        rxBuffer[rxIndex] = '\0';
+      }
+    }
+    delay(10);
+  }
+
+  // 5. Ищем начало JSON (пропускаем HTTP заголовки)
+  // JSON начинается после двойного переноса строки \r\n\r\n
+  char* jsonStart = strstr(rxBuffer, "\r\n\r\n");
+  if (jsonStart) {
+    jsonStart += 4;  // Пропускаем \r\n\r\n
+    // Сдвигаем JSON в начало буфера
+    int jsonLen = strlen(jsonStart);
+    memmove(rxBuffer, jsonStart, jsonLen + 1);
+  }
+
+  // 6. Парсим JSON ответ (ручной парсинг без библиотек)
   bool light = false;
   bool pump  = false;
+
+  Serial.print(F("Response: "));
+  Serial.println(rxBuffer);
 
   char* lightPos = strstr(rxBuffer, "\"light\"");
   if (lightPos && strstr(lightPos, "true")) {
@@ -274,11 +307,11 @@ void getServerCommand() {
   Serial.print(F(", pump="));
   Serial.println(pump ? F("true") : F("false"));
 
-  // 5. Выполняем команды
+  // 7. Выполняем команды
   setLight(light);
   setPump(pump);
 
-  // 6. Закрываем соединение
+  // 8. Закрываем соединение
   sendATCommand("AT+CIPCLOSE", 2000);
 }
 
