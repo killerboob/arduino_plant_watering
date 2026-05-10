@@ -231,99 +231,79 @@ void sendPostData(int soil_moisture, int leak, int water_reservoir) {
 
 void getServerCommand() {
   if (!wifiConnected) return;
-  
-  Serial.println(F("GET commands..."));
-  
-  // Отключаем эхо
-  WIFI_SERIAL.println("ATE0");
-  delay(100);
-  
-  // Очищаем буфер
-  while (WIFI_SERIAL.available()) WIFI_SERIAL.read();
-  
-  // Открываем соединение
+
+  Serial.println(F("[GET] Sending request..."));
+
+  // 1. Открываем соединение с сервером
   WIFI_SERIAL.println("AT+CIPSTART=\"TCP\",\"213.171.25.91\",80");
-  delay(2000);
-  while (WIFI_SERIAL.available()) WIFI_SERIAL.read();
-  
-  // GET запрос
-  const char* getReq = "GET /smart-watering/2/get_endpoint HTTP/1.0\r\nHost: 213.171.25.91\r\n\r\n";
-  
+  if (!waitForResponse("OK", 5000)) { // Ждем 'OK' от модуля
+    Serial.println(F("[GET] Connection failed"));
+    return;
+  }
+
+  // 2. Формируем и отправляем запрос
+  String request = "GET /smart-watering/2/get_endpoint HTTP/1.0\r\n"
+                   "Host: 213.171.25.91\r\n"
+                   "Connection: close\r\n" // Говорим серверу закрыть соединение после ответа
+                   "\r\n";
+
+  // Готовим модуль к отправке
   WIFI_SERIAL.print("AT+CIPSEND=");
-  WIFI_SERIAL.println(strlen(getReq));
-  
-  // Ждём >
-  unsigned long start = millis();
-  while (millis() - start < 3000) {
-    if (WIFI_SERIAL.available() && WIFI_SERIAL.read() == '>') break;
+  WIFI_SERIAL.println(request.length());
+
+  // Ждем приглашение '>' от модуля
+  if (!waitForResponse(">", 3000)) {
+    Serial.println(F("[GET] Send prompt not received"));
+    WIFI_SERIAL.println("AT+CIPCLOSE");
+    return;
   }
-  
-  // Отправляем GET
-  WIFI_SERIAL.print(getReq);
-  Serial.println(F("GET sent, waiting for +IPD..."));
-  
-  // ЖДЁМ ПОКА НЕ ПРИДЁТ +IPD (данные от сервера)
-  bool received = false;
-  start = millis();
-  rxIndex = 0;
-  
-  while (millis() - start < 10000) {  // ждём до 10 секунд
-    while (WIFI_SERIAL.available()) {
-      char c = WIFI_SERIAL.read();
-      
-      // Сохраняем в буфер
-      if (rxIndex < sizeof(rxBuffer) - 1) {
-        rxBuffer[rxIndex++] = c;
-        rxBuffer[rxIndex] = '\0';
-      }
-      
-      // Если нашли +IPD - значит есть данные!
-      if (strstr(rxBuffer, "+IPD") != NULL) {
-        received = true;
-        Serial.println(F("+IPD received!"));
-        
-        // Проверяем не закончились ли данные
-        if (strstr(rxBuffer, "}") != NULL) {
-          start = millis() - 10000; // выходим из цикла
-          break;
-        }
-      }
+
+  // Отправляем сам HTTP-запрос
+  WIFI_SERIAL.print(request);
+  Serial.println(F("[GET] Request sent, waiting for response..."));
+
+  // --- САМАЯ ВАЖНАЯ ЧАСТЬ: Ждем данные от сервера ---
+  // Ищем маркер '+IPD', который означает, что пришли данные[citation:9]
+  if (waitForResponse("+IPD", 5000)) { // Ждем до 5 секунд
+    Serial.println(F("[GET] Data received!"));
+    
+    // В 'rxBuffer' теперь лежит сырой ответ, например:
+    // +IPD,68:{"light":"true","pump":"true"}
+
+    // Ищем начало JSON-объекта '{' и его конец '}'
+    char* startJson = strchr(rxBuffer, '{');
+    char* endJson = strrchr(rxBuffer, '}');
+
+    if (startJson && endJson) {
+      // Вырезаем чистый JSON
+      int len = endJson - startJson + 1;
+      char json[len + 1];
+      strncpy(json, startJson, len);
+      json[len] = '\0';
+
+      Serial.print(F("[GET] Raw JSON: "));
+      Serial.println(json);
+
+      // Парсим JSON (ищем "true")
+      bool light = (strstr(json, "\"light\":\"true\"") != NULL);
+      bool pump  = (strstr(json, "\"pump\":\"true\"") != NULL);
+
+      Serial.print(F("[GET] Parsed: light="));
+      Serial.print(light);
+      Serial.print(F(", pump="));
+      Serial.println(pump);
+
+      setLight(light);
+      setPump(pump);
+    } else {
+      Serial.println(F("[GET] JSON not found in response"));
+      Serial.print(F("[GET] Full buffer response: "));
+      Serial.println(rxBuffer); // Выводим всё для отладки
     }
-    if (received && strstr(rxBuffer, "}")) break;
-    delay(10);
-  }
-  
-  // Выводим что получили
-  Serial.print(F("Raw: "));
-  Serial.println(rxBuffer);
-  
-  // Ищем JSON между { и }
-  char* jsonStart = strchr(rxBuffer, '{');
-  char* jsonEnd = strrchr(rxBuffer, '}');
-  
-  if (jsonStart && jsonEnd && jsonEnd > jsonStart) {
-    int jsonLen = jsonEnd - jsonStart + 1;
-    char json[64];
-    strncpy(json, jsonStart, jsonLen);
-    json[jsonLen] = '\0';
-    
-    Serial.print(F("JSON: "));
-    Serial.println(json);
-    
-    bool light = (strstr(json, "\"light\":\"true\"") != NULL);
-    bool pump  = (strstr(json, "\"pump\":\"true\"") != NULL);
-    
-    Serial.print(F("light="));
-    Serial.print(light);
-    Serial.print(F(" pump="));
-    Serial.println(pump);
-    
-    setLight(light);
-    setPump(pump);
   } else {
-    Serial.println(F("No JSON found"));
+    Serial.println(F("[GET] No data received (+IPD not found)"));
   }
-  
+
   // Закрываем соединение
   WIFI_SERIAL.println("AT+CIPCLOSE");
   delay(500);
