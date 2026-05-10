@@ -230,75 +230,60 @@ void sendPostData(int soil_moisture, int leak, int water_reservoir) {
 // {"light":"true","pump":"true"}
 
 void getServerCommand() {
-  if (!wifiConnected) return;
+  Serial.println(F("=== GET START ==="));
   
-  Serial.println(F("GET commands..."));
-  
-  // ОТКЛЮЧАЕМ ЭХО КОМАНД (раз и навсегда)
+  // Отключаем эхо команд
   WIFI_SERIAL.println("ATE0");
   delay(100);
   
-  // Очищаем буфер
-  while (WIFI_SERIAL.available()) WIFI_SERIAL.read();
+  // Очищаем ВЕСЬ буфер
+  while(WIFI_SERIAL.available()) WIFI_SERIAL.read();
   
-  // Открываем соединение с таймаутом
+  // Открываем соединение
   WIFI_SERIAL.println("AT+CIPSTART=\"TCP\",\"213.171.25.91\",80");
   delay(2000);
   
-  // Читаем ответ на CIPSTART (пропускаем)
-  while (WIFI_SERIAL.available()) WIFI_SERIAL.read();
+  // Очищаем снова
+  while(WIFI_SERIAL.available()) WIFI_SERIAL.read();
   
-  // Отправляем GET запрос через CIPSEND (как в POST)
-  String getReq = "GET /smart-watering/2/get_endpoint HTTP/1.0\r\nHost: 213.171.25.91\r\n\r\n";
-  
-  WIFI_SERIAL.print("AT+CIPSEND=");
-  WIFI_SERIAL.println(getReq.length());
+  // Отправляем CIPSEND
+  WIFI_SERIAL.println("AT+CIPSEND=52");
   delay(500);
   
-  // Ждём приглашение >
-  while (!WIFI_SERIAL.available()) delay(10);
-  if (WIFI_SERIAL.read() != '>') {
-    Serial.println(F("No prompt"));
-    WIFI_SERIAL.println("AT+CIPCLOSE");
-    return;
-  }
-  
-  // Отправляем запрос
-  WIFI_SERIAL.print(getReq);
-  delay(2000);
-  
-  // Читаем ответ (игнорируем +IPD префикс)
-  String response = "";
+  // Ждем символ > (приглашение отправить данные)
   unsigned long start = millis();
-  while (millis() - start < 3000) {
-    if (WIFI_SERIAL.available()) {
+  while(millis() - start < 2000) {
+    if(WIFI_SERIAL.available()) {
       char c = WIFI_SERIAL.read();
-      response += c;
+      Serial.print("[PROMPT] ");
+      Serial.println(c);
+      if(c == '>') break;
     }
   }
   
-  // Ищем JSON между { и }
-  int startJson = response.indexOf('{');
-  int endJson = response.lastIndexOf('}');
+  // Отправляем HTTP запрос
+  WIFI_SERIAL.print("GET /smart-watering/2/get_endpoint HTTP/1.0\r\n");
+  WIFI_SERIAL.print("Host: 213.171.25.91\r\n");
+  WIFI_SERIAL.print("\r\n");
   
-  if (startJson >= 0 && endJson > startJson) {
-    String json = response.substring(startJson, endJson + 1);
-    Serial.print(F("JSON: "));
-    Serial.println(json);
-    
-    // Простой парсинг
-    bool light = (json.indexOf("\"light\":\"true\"") >= 0);
-    bool pump  = (json.indexOf("\"pump\":\"true\"") >= 0);
-    
-    setLight(light);
-    setPump(pump);
-  } else {
-    Serial.print(F("Response: "));
-    Serial.println(response);
+  Serial.println("GET sent, waiting 3 sec...");
+  delay(3000);
+  
+  // ВЫВОДИМ ВСЕ БАЙТЫ что пришли
+  Serial.println("=== BYTES RECEIVED ===");
+  int count = 0;
+  while(WIFI_SERIAL.available()) {
+    char c = WIFI_SERIAL.read();
+    Serial.print(c, HEX);  // выводим в HEX
+    Serial.print(" ");
+    count++;
   }
+  Serial.println();
+  Serial.print("Total bytes: ");
+  Serial.println(count);
+  Serial.println("=== END ===");
   
   WIFI_SERIAL.println("AT+CIPCLOSE");
-  delay(500);
 }
 
 // =============================================================================
