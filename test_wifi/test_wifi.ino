@@ -230,24 +230,62 @@ void sendPostData(int soil_moisture, int leak, int water_reservoir) {
 // {"light":"true","pump":"true"}
 
 void getServerCommand() {
-  // Команда для ESP: подключиться и прочитать данные
+  if (!wifiConnected) return;
+  
+  Serial.println(F("[GET] Переход по ссылке..."));
+  
+  // Очищаем буфер
+  while(WIFI_SERIAL.available()) WIFI_SERIAL.read();
+  
+  // Открываем соединение (как браузер)
   WIFI_SERIAL.println("AT+CIPSTART=\"TCP\",\"213.171.25.91\",80");
   delay(2000);
   
-  // Отправляем СЫРЫЕ данные (без HTTP заголовков)
-  WIFI_SERIAL.println("GET /smart-watering/2/get_endpoint");
-  delay(1000);
+  // Отправляем GET запрос (как если бы в браузере ввели адрес)
+  WIFI_SERIAL.println("GET /smart-watering/2/get_endpoint HTTP/1.0");
+  WIFI_SERIAL.println("Host: 213.171.25.91");
+  WIFI_SERIAL.println("Connection: close");
+  WIFI_SERIAL.println();
   
-  // Читаем ответ
-  Serial.println(F("=== RESPONSE ==="));
-  unsigned long start = millis();
-  while(millis() - start < 5000) {
-    if(WIFI_SERIAL.available()) {
-      Serial.write(WIFI_SERIAL.read());
-    }
+  Serial.println(F("[GET] Ожидание ответа..."));
+  delay(3000);  // Ждём ответа от сервера
+  
+  // ЧИТАЕМ ВСЁ ЧТО ПРИШЛО (как браузер читает HTML)
+  String fullResponse = "";
+  while(WIFI_SERIAL.available()) {
+    fullResponse += (char)WIFI_SERIAL.read();
   }
-  Serial.println(F("\n=== END ==="));
   
+  // Выводим что пришло (для отладки)
+  Serial.println(F("=== ПРИШЛО ==="));
+  Serial.println(fullResponse);
+  Serial.println(F("=== КОНЕЦ ==="));
+  
+  // Ищем JSON между { и }
+  int startJson = fullResponse.indexOf('{');
+  int endJson = fullResponse.lastIndexOf('}');
+  
+  if(startJson >= 0 && endJson > startJson) {
+    String json = fullResponse.substring(startJson, endJson + 1);
+    Serial.print(F("JSON найден: "));
+    Serial.println(json);
+    
+    // Парсим команды
+    bool light = (json.indexOf("\"light\":\"true\"") >= 0);
+    bool pump = (json.indexOf("\"pump\":\"true\"") >= 0);
+    
+    Serial.print(F("light="));
+    Serial.print(light);
+    Serial.print(F(" pump="));
+    Serial.println(pump);
+    
+    setLight(light);
+    setPump(pump);
+  } else {
+    Serial.println(F("JSON не найден"));
+  }
+  
+  // Закрываем соединение
   WIFI_SERIAL.println("AT+CIPCLOSE");
 }
 // =============================================================================
@@ -292,7 +330,8 @@ void setup() {
 
   // Открываем связь с WiFi модулем (9600 baud)
   WIFI_SERIAL.begin(9600);
-
+  WIFI_SERIAL.println("AT+UART_DEF=9600,8,1,0,0");
+  delay(100);
   // Подключаемся к WiFi
   wifiConnect();
 }
