@@ -236,35 +236,48 @@ void getServerCommand() {
 
   // 1. Открываем TCP соединение
   WIFI_SERIAL.println("AT+CIPSTART=\"TCP\",\"213.171.25.91\",80");
-  if (!waitForResponse("OK", 5000)) {
-    Serial.println(F("CIPSTART failed"));
-    return;
-  }
-
-  // 2. GET запрос (одной строкой без snprintf)
+  delay(1000);  // Просто ждём вместо waitForResponse
+  
+  // 2. Очищаем буфер приёма
+  while (WIFI_SERIAL.available()) WIFI_SERIAL.read();
+  
+  // 3. GET запрос
   const char* getRequest = "GET /smart-watering/2/get_endpoint HTTP/1.0\r\nHost: 213.171.25.91\r\n\r\n";
   int reqLen = strlen(getRequest);
-
-  // 3. Отправляем CIPSEND
+  
+  // 4. Отправляем CIPSEND
   WIFI_SERIAL.print("AT+CIPSEND=");
   WIFI_SERIAL.println(reqLen);
   
-  if (!waitForResponse(">", 2000)) {
-    Serial.println(F("CIPSEND prompt failed"));
+  // 5. Ждём символ ">" вручную
+  unsigned long start = millis();
+  bool gotPrompt = false;
+  while (millis() - start < 2000) {
+    if (WIFI_SERIAL.available()) {
+      char c = WIFI_SERIAL.read();
+      if (c == '>') {
+        gotPrompt = true;
+        break;
+      }
+    }
+  }
+  
+  if (!gotPrompt) {
+    Serial.println(F("No > prompt, closing"));
     WIFI_SERIAL.println("AT+CIPCLOSE");
     return;
   }
-
-  // 4. Отправляем GET запрос
+  
+  // 6. Отправляем GET запрос
   WIFI_SERIAL.print(getRequest);
   Serial.println(F("GET sent"));
-
-  // 5. ОЧИЩАЕМ rxBuffer ПЕРЕД ЧТЕНИЕМ!
-  rxIndex = 0;
-  memset(rxBuffer, 0, sizeof(rxBuffer));
   
-  // 6. Ждём ответ с таймаутом
-  unsigned long start = millis();
+  // 7. Ждём ответ
+  delay(1000);
+  
+  // 8. Читаем ответ
+  rxIndex = 0;
+  start = millis();
   while (millis() - start < 3000) {
     while (WIFI_SERIAL.available()) {
       char c = WIFI_SERIAL.read();
@@ -273,30 +286,28 @@ void getServerCommand() {
         rxBuffer[rxIndex] = '\0';
       }
     }
-    if (strstr(rxBuffer, "}")) break;  // Нашли конец JSON
     delay(10);
   }
-
-  // 7. ОТЛАДКА - выводим что пришло
-  Serial.print(F("Response: ["));
-  Serial.print(rxBuffer);
-  Serial.println(F("]"));
-
-  // 8. Парсим (ищем просто "true" после ключей)
+  
+  // 9. Отладка
+  Serial.print(F("Response: "));
+  Serial.println(rxBuffer);
+  
+  // 10. Парсим
   bool light = (strstr(rxBuffer, "\"light\":\"true\"") != NULL);
   bool pump  = (strstr(rxBuffer, "\"pump\":\"true\"") != NULL);
   
-  Serial.print(F("Parsed: light="));
-  Serial.print(light ? "true" : "false");
-  Serial.print(F(", pump="));
-  Serial.println(pump ? "true" : "false");
-
+  Serial.print(F("light="));
+  Serial.print(light);
+  Serial.print(F(" pump="));
+  Serial.println(pump);
+  
   setLight(light);
   setPump(pump);
-
-  // 9. Закрываем
+  
+  // 11. Закрываем
   WIFI_SERIAL.println("AT+CIPCLOSE");
-  waitForResponse("OK", 1000);
+  delay(500);
 }
 // =============================================================================
 // ФУНКЦИЯ: Основной цикл работы (вызывается каждые 10 секунд)
