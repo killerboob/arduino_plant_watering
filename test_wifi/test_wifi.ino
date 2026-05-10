@@ -231,82 +231,56 @@ void sendPostData(int soil_moisture, int leak, int water_reservoir) {
 
 void getServerCommand() {
   if (!wifiConnected) return;
-
-  Serial.println(F("[GET] Sending request..."));
-
-  // 1. Открываем соединение с сервером
+  
+  Serial.println(F("=== SIMPLE GET ==="));
+  
+  // Очищаем
+  while(WIFI_SERIAL.available()) WIFI_SERIAL.read();
+  
+  // Отправляем одной командой (ESP8266 сам разберется)
   WIFI_SERIAL.println("AT+CIPSTART=\"TCP\",\"213.171.25.91\",80");
-  if (!waitForResponse("OK", 5000)) { // Ждем 'OK' от модуля
-    Serial.println(F("[GET] Connection failed"));
-    return;
-  }
-
-  // 2. Формируем и отправляем запрос
-  String request = "GET /smart-watering/2/get_endpoint HTTP/1.0\r\n"
-                   "Host: 213.171.25.91\r\n"
-                   "Connection: close\r\n" // Говорим серверу закрыть соединение после ответа
-                   "\r\n";
-
-  // Готовим модуль к отправке
-  WIFI_SERIAL.print("AT+CIPSEND=");
-  WIFI_SERIAL.println(request.length());
-
-  // Ждем приглашение '>' от модуля
-  if (!waitForResponse(">", 3000)) {
-    Serial.println(F("[GET] Send prompt not received"));
-    WIFI_SERIAL.println("AT+CIPCLOSE");
-    return;
-  }
-
-  // Отправляем сам HTTP-запрос
-  WIFI_SERIAL.print(request);
-  Serial.println(F("[GET] Request sent, waiting for response..."));
-
-  // --- САМАЯ ВАЖНАЯ ЧАСТЬ: Ждем данные от сервера ---
-  // Ищем маркер '+IPD', который означает, что пришли данные[citation:9]
-  if (waitForResponse("+IPD", 5000)) { // Ждем до 5 секунд
-    Serial.println(F("[GET] Data received!"));
+  delay(2000);
+  
+  // Отправляем GET запрос КАК ЕСТЬ сразу после CONNECT
+  WIFI_SERIAL.println("GET /smart-watering/2/get_endpoint HTTP/1.0");
+  WIFI_SERIAL.println("Host: 213.171.25.91");
+  WIFI_SERIAL.println();
+  WIFI_SERIAL.println();
+  
+  delay(3000);
+  
+  // Читаем ответ
+  Serial.println(F("=== RESPONSE ==="));
+  while(WIFI_SERIAL.available()) {
+    char c = WIFI_SERIAL.read();
+    Serial.print(c);
     
-    // В 'rxBuffer' теперь лежит сырой ответ, например:
-    // +IPD,68:{"light":"true","pump":"true"}
-
-    // Ищем начало JSON-объекта '{' и его конец '}'
-    char* startJson = strchr(rxBuffer, '{');
-    char* endJson = strrchr(rxBuffer, '}');
-
-    if (startJson && endJson) {
-      // Вырезаем чистый JSON
-      int len = endJson - startJson + 1;
-      char json[len + 1];
-      strncpy(json, startJson, len);
-      json[len] = '\0';
-
-      Serial.print(F("[GET] Raw JSON: "));
+    // Если видим JSON - парсим прямо на лету
+    static bool inJson = false;
+    static char json[128];
+    static int idx = 0;
+    
+    if(c == '{') {
+      inJson = true;
+      idx = 0;
+      json[idx++] = c;
+    } else if(inJson && c == '}') {
+      json[idx++] = c;
+      json[idx] = '\0';
+      Serial.print(F("\n\nPARSED JSON: "));
       Serial.println(json);
-
-      // Парсим JSON (ищем "true")
-      bool light = (strstr(json, "\"light\":\"true\"") != NULL);
-      bool pump  = (strstr(json, "\"pump\":\"true\"") != NULL);
-
-      Serial.print(F("[GET] Parsed: light="));
-      Serial.print(light);
-      Serial.print(F(", pump="));
-      Serial.println(pump);
-
-      setLight(light);
-      setPump(pump);
-    } else {
-      Serial.println(F("[GET] JSON not found in response"));
-      Serial.print(F("[GET] Full buffer response: "));
-      Serial.println(rxBuffer); // Выводим всё для отладки
+      
+      if(strstr(json, "\"light\":\"true\"")) setLight(true);
+      if(strstr(json, "\"pump\":\"true\"")) setPump(true);
+      
+      inJson = false;
+    } else if(inJson && idx < 127) {
+      json[idx++] = c;
     }
-  } else {
-    Serial.println(F("[GET] No data received (+IPD not found)"));
   }
-
-  // Закрываем соединение
+  Serial.println(F("\n=== END ==="));
+  
   WIFI_SERIAL.println("AT+CIPCLOSE");
-  delay(500);
 }
 // =============================================================================
 // ФУНКЦИЯ: Основной цикл работы (вызывается каждые 10 секунд)
