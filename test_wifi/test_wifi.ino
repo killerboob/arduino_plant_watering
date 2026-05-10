@@ -230,57 +230,14 @@ void sendPostData(int soil_moisture, int leak, int water_reservoir) {
 // {"light":"true","pump":"true"}
 
 void getServerCommand() {
-  if (!wifiConnected) return;
-  
-  Serial.println(F("=== SIMPLE GET ==="));
-  
-  // Очищаем
-  while(WIFI_SERIAL.available()) WIFI_SERIAL.read();
-  
-  // Отправляем одной командой (ESP8266 сам разберется)
-  WIFI_SERIAL.println("AT+CIPSTART=\"TCP\",\"213.171.25.91\",80");
-  delay(2000);
-  
-  // Отправляем GET запрос КАК ЕСТЬ сразу после CONNECT
-  WIFI_SERIAL.println("GET /smart-watering/2/get_endpoint HTTP/1.0");
-  WIFI_SERIAL.println("Host: 213.171.25.91");
-  WIFI_SERIAL.println();
-  WIFI_SERIAL.println();
-  
+  // Некоторые прошивки ESP поддерживают AT+HTTPGET
+  WIFI_SERIAL.println("AT+HTTPGET=\"http://213.171.25.91/smart-watering/2/get_endpoint\"");
   delay(3000);
   
-  // Читаем ответ
-  Serial.println(F("=== RESPONSE ==="));
+  // Выводим ответ
   while(WIFI_SERIAL.available()) {
-    char c = WIFI_SERIAL.read();
-    Serial.print(c);
-    
-    // Если видим JSON - парсим прямо на лету
-    static bool inJson = false;
-    static char json[128];
-    static int idx = 0;
-    
-    if(c == '{') {
-      inJson = true;
-      idx = 0;
-      json[idx++] = c;
-    } else if(inJson && c == '}') {
-      json[idx++] = c;
-      json[idx] = '\0';
-      Serial.print(F("\n\nPARSED JSON: "));
-      Serial.println(json);
-      
-      if(strstr(json, "\"light\":\"true\"")) setLight(true);
-      if(strstr(json, "\"pump\":\"true\"")) setPump(true);
-      
-      inJson = false;
-    } else if(inJson && idx < 127) {
-      json[idx++] = c;
-    }
+    Serial.write(WIFI_SERIAL.read());
   }
-  Serial.println(F("\n=== END ==="));
-  
-  WIFI_SERIAL.println("AT+CIPCLOSE");
 }
 // =============================================================================
 // ФУНКЦИЯ: Основной цикл работы (вызывается каждые 10 секунд)
