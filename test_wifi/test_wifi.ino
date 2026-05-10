@@ -230,23 +230,21 @@ void sendPostData(int soil_moisture, int leak, int water_reservoir) {
 // {"light":"true","pump":"true"}
 
 void getServerCommand() {
-  Serial.println(F("=== READ URL ==="));
-  
-  // Открываем соединение
+  // Команда для ESP: подключиться и прочитать данные
   WIFI_SERIAL.println("AT+CIPSTART=\"TCP\",\"213.171.25.91\",80");
   delay(2000);
   
-  // Отправляем МИНИМАЛЬНЫЙ запрос (как telnet)
-  WIFI_SERIAL.println("GET /smart-watering/2/get_endpoint HTTP/1.0");
-  WIFI_SERIAL.println();  // пустая строка
-  WIFI_SERIAL.println();  // еще одна пустая
+  // Отправляем СЫРЫЕ данные (без HTTP заголовков)
+  WIFI_SERIAL.println("GET /smart-watering/2/get_endpoint");
+  delay(1000);
   
-  delay(2000);
-  
-  // ПРОСТО ВЫВОДИМ ВСЁ ЧТО ПРИШЛО
-  Serial.println(F("=== RAW OUTPUT ==="));
-  while(WIFI_SERIAL.available()) {
-    Serial.write(WIFI_SERIAL.read());
+  // Читаем ответ
+  Serial.println(F("=== RESPONSE ==="));
+  unsigned long start = millis();
+  while(millis() - start < 5000) {
+    if(WIFI_SERIAL.available()) {
+      Serial.write(WIFI_SERIAL.read());
+    }
   }
   Serial.println(F("\n=== END ==="));
   
