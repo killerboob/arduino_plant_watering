@@ -234,70 +234,87 @@ void getServerCommand() {
 
   Serial.println(F("[GET] Sending request..."));
 
-  // На всякий случай закрываем предыдущее соединение
-  WIFI_SERIAL.println("AT+CIPCLOSE");
-  waitForResponse("OK", 1000);
+  // ===== 1. Очистка буфера и проверка готовности ESP =====
+  memset(rxBuffer, 0, sizeof(rxBuffer));
+  rxIndex = 0;
+  while (WIFI_SERIAL.available()) WIFI_SERIAL.read();  // удаляем хлам из SoftwareSerial
 
-  // 1. Открываем TCP соединение
+  WIFI_SERIAL.println("AT");
+  if (!waitForResponse("OK", 2000)) {
+    Serial.println(F("[GET] ESP not ready"));
+    return;
+  }
+
+  // Закрываем возможное предыдущее соединение
+  WIFI_SERIAL.println("AT+CIPCLOSE");
+  waitForResponse("OK", 2000);
+  delay(100);
+
+  // ===== 2. TCP подключение =====
   snprintf(txBuffer, sizeof(txBuffer), "AT+CIPSTART=\"TCP\",\"%s\",80", SERVER_IP);
   WIFI_SERIAL.println(txBuffer);
 
-  // Ждём либо "OK", либо "ALREADY CONNECTED"
   bool connected = false;
-  if (waitForResponse("OK", 5000)) {
+  if (waitForResponse("OK", 10000)) {
     connected = true;
   } else if (waitForResponse("ALREADY CONNECTED", 1000)) {
     connected = true;
   }
 
   if (!connected) {
-    Serial.println(F("[GET] TCP connection failed"));
+    Serial.println(F("[GET] TCP connect failed"));
     return;
   }
   Serial.println(F("[GET] TCP connected"));
 
-  // 2. Точная длина HTTP‑запроса (без нуль‑терминатора)
+  // ===== 3. Точная длина HTTP-запроса =====
   int len = 0;
   len += strlen("GET /smart-watering/2/get_endpoint HTTP/1.1\r\n");
   len += strlen("Host: 213.171.25.91\r\n");
   len += strlen("Connection: close\r\n");
   len += 2; // финальное \r\n
 
-  // 3. Команда CIPSEND
+  // ===== 4. CIPSEND =====
   WIFI_SERIAL.print("AT+CIPSEND=");
   WIFI_SERIAL.println(len);
 
-  if (!waitForResponse('>', 2000)) {
-    Serial.println(F("[GET] No '>' prompt, sending anyway"));
+  if (!waitForResponse('>', 5000)) {
+    Serial.println(F("[GET] No '>' prompt"));
   }
 
-  // 4. Отправляем GET запрос
+  // ===== 5. Отправляем GET запрос =====
   WIFI_SERIAL.print("GET /smart-watering/2/get_endpoint HTTP/1.1\r\n");
   WIFI_SERIAL.print("Host: 213.171.25.91\r\n");
   WIFI_SERIAL.print("Connection: close\r\n");
   WIFI_SERIAL.print("\r\n");
-  Serial.println(F("[GET] Request sent, waiting for response..."));
+  Serial.println(F("[GET] Request sent, reading response..."));
 
-  // 5. Читаем ответ в буфер (максимум 10 секунд)
+  // ===== 6. Читаем ответ до "CLOSED" или таймаута 10 сек =====
   memset(rxBuffer, 0, sizeof(rxBuffer));
   rxIndex = 0;
+
   unsigned long start = millis();
   while (millis() - start < 10000) {
     while (WIFI_SERIAL.available()) {
       char c = WIFI_SERIAL.read();
-      Serial.write(c);                     // дублируем в монитор для отладки
       if (rxIndex < sizeof(rxBuffer) - 1) {
         rxBuffer[rxIndex++] = c;
+        rxBuffer[rxIndex] = '\0';
+      }
+      // Увидели закрытие – выходим
+      if (strstr(rxBuffer, "CLOSED")) {
+        start = 0; // метка для выхода из внешнего while
+        break;
       }
     }
-    // если видим "CLOSED", значит сервер закончил передачу
-    if (strstr(rxBuffer, "CLOSED")) {
-      break;
-    }
+    if (start == 0) break;
     delay(1);
   }
 
-  // 6. Ищем JSON между фигурными скобками
+  Serial.print(F("[GET] Raw buffer: "));
+  Serial.println(rxBuffer);
+
+  // ===== 7. Ищем JSON =====
   char* startJson = strchr(rxBuffer, '{');
   char* endJson   = strrchr(rxBuffer, '}');
 
@@ -321,11 +338,10 @@ void getServerCommand() {
     setLight(light);
     setPump(pump);
   } else {
-    Serial.print(F("[GET] No JSON found. Buffer: "));
-    Serial.println(rxBuffer);
+    Serial.println(F("[GET] No JSON found"));
   }
 
-  // 7. Закрываем соединение (может быть уже закрыто, но не повредит)
+  // ===== 8. Закрываем соединение =====
   WIFI_SERIAL.println("AT+CIPCLOSE");
   waitForResponse("OK", 2000);
 }
