@@ -11,6 +11,7 @@ const char* SERVER_IP     = "213.171.25.91";
 const int TELEMETRY_INTERVAL_MS = 10000;
 
 bool wifiConnected = false;
+unsigned long lastCheckTime = 0;          // ← добавлено
 char txBuffer[128];
 
 // ===================== НАДЁЖНЫЕ ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ =====================
@@ -261,7 +262,6 @@ void setup() {
 }
 
 void loop() {
-  // Фоновый сбор мусора НЕ ДЕЛАЕМ, чтобы не съедать данные запросов.
   if (millis() - lastCheckTime >= TELEMETRY_INTERVAL_MS) {
     lastCheckTime = millis();
     processWiFiCycle();
