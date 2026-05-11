@@ -88,7 +88,7 @@ void sendPostData(int soil_moisture, int leak, int water_reservoir) {
   }
   Serial.println(F("[POST] TCP ok"));
 
-  // Длина JSON (строка помещается в 100 байт, поэтому можно вычислить заранее)
+  // Длина JSON (вычисляем один раз, txBuffer временно хранит строку)
   int jsonLen = snprintf(txBuffer, sizeof(txBuffer),
     "{\"soil moisture\":%d,\"leak\":%d,\"water reservoir\":%d,\"human_name\":\"second\"}",
     soil_moisture, leak, water_reservoir);
@@ -98,7 +98,8 @@ void sendPostData(int soil_moisture, int leak, int water_reservoir) {
   const char ctHeader[]   = "\r\nContent-Type: application/json\r\nContent-Length: ";
   int hostLen = strlen(SERVER_IP);
   int numDigits = (jsonLen >= 100) ? 3 : (jsonLen >= 10) ? 2 : 1;
-  int fullLen = strlen(httpHeader) + hostLen + strlen(ctHeader) + numDigits + 2 + jsonLen; // +2 for \r\n
+  int fullLen = strlen(httpHeader) + hostLen + strlen(ctHeader) + numDigits + 4 + jsonLen;
+  // +4: \r\n\r\n после значения Content-Length
 
   snprintf(txBuffer, sizeof(txBuffer), "AT+CIPSEND=%d", fullLen);
   WIFI_SERIAL.println(txBuffer);
@@ -107,13 +108,13 @@ void sendPostData(int soil_moisture, int leak, int water_reservoir) {
     return;
   }
 
-  // Отправляем HTTP побайтово
+  // Отправляем HTTP по частям
   WIFI_SERIAL.print(httpHeader);
   WIFI_SERIAL.print(SERVER_IP);
   WIFI_SERIAL.print(ctHeader);
   WIFI_SERIAL.print(jsonLen);
   WIFI_SERIAL.print("\r\n\r\n");
-  // JSON
+  // JSON тело
   WIFI_SERIAL.print("{\"soil moisture\":");
   WIFI_SERIAL.print(soil_moisture);
   WIFI_SERIAL.print(",\"leak\":");
