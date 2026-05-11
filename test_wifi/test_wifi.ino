@@ -14,7 +14,7 @@ bool wifiConnected = false;
 unsigned long lastCheckTime = 0;
 
 char txBuffer[100];
-char rxBuffer[300];
+char rxBuffer[256];
 int rxIndex = 0;
 
 // ------------------------------------------------------------------
