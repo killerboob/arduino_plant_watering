@@ -7,6 +7,7 @@
 #define PIN_WATER_RESERVOIR 7
 #define PIN_PUMP           11
 #define PIN_LIGHT          12
+#define PIN_LED            10   // индикатор
 
 SoftwareSerial mySerial(4, 5);
 #define WIFI_SERIAL mySerial
@@ -19,18 +20,26 @@ const int TELEMETRY_INTERVAL_MS = 10000;
 bool wifiConnected = false;
 unsigned long lastCheckTime = 0;
 
-// Глобальные буферы WiFi
 char txBuffer[100];
 char rxBuffer[256];
 int rxIndex = 0;
 
-// Состояния устройств
-bool pumpState = false;        // true = включена
-unsigned long pumpOnTime = 0;  // время включения для автоотключения
+bool pumpState = false;
+unsigned long pumpOnTime = 0;
 bool lightState = false;
 
 // ------------------------------------------------------------------
-// ВСПОМОГАТЕЛЬНЫЕ WiFi (без изменений)
+void blinkLed(int times, int delayMs) {
+  for (int i = 0; i < times; i++) {
+    digitalWrite(PIN_LED, HIGH);
+    delay(delayMs);
+    digitalWrite(PIN_LED, LOW);
+    if (i < times - 1) delay(delayMs);
+  }
+}
+
+// ------------------------------------------------------------------
+// ВСПОМОГАТЕЛЬНЫЕ WiFi
 bool waitForResponse(const char* expected, unsigned long timeout) {
   memset(rxBuffer, 0, sizeof(rxBuffer));
   rxIndex = 0;
@@ -73,6 +82,7 @@ void wifiConnect() {
   if (waitForResponse("OK", 12000)) {
     wifiConnected = true;
     Serial.println(F("WiFi connected"));
+    blinkLed(3, 200);   // индикация подключения
   } else {
     wifiConnected = false;
     Serial.println(F("WiFi connect failed"));
@@ -80,7 +90,7 @@ void wifiConnect() {
 }
 
 // ------------------------------------------------------------------
-// ДАТЧИКИ И УПРАВЛЕНИЕ
+// ДАТЧИКИ (логика: LOW=есть вода, HIGH=нет воды; LOW=протечка, HIGH=норма)
 int readSoilMoisture() {
   const int samples = 5;
   long sum = 0;
@@ -99,18 +109,27 @@ int readWaterReservoir() {
   return digitalRead(PIN_WATER_RESERVOIR);
 }
 
+void updateLedError() {
+  // Светодиод горит, если протечка (LOW) или нет воды (HIGH)
+  if (readLeak() == LOW || readWaterReservoir() == HIGH) {
+    digitalWrite(PIN_LED, HIGH);
+  } else {
+    digitalWrite(PIN_LED, LOW);
+  }
+}
+
 void setPump(bool state) {
-  // защита: перед включением проверяем воду и протечку
   if (state) {
-    if (readWaterReservoir() == 0) {
-      Serial.println(F("PUMP: no water, ignoring ON"));
+    // Вода есть только если датчик воды LOW
+    if (readWaterReservoir() == HIGH) {
+      Serial.println(F("PUMP: no water (sensor HIGH), ignoring ON"));
       return;
     }
-    if (readLeak() == 1) {
-      Serial.println(F("PUMP: leak detected, ignoring ON"));
+    // Протечка – если датчик протечки LOW
+    if (readLeak() == LOW) {
+      Serial.println(F("PUMP: leak detected (sensor LOW), ignoring ON"));
       return;
     }
-    // включаем
     digitalWrite(PIN_PUMP, HIGH);
     pumpState = true;
     pumpOnTime = millis();
@@ -129,8 +148,7 @@ void setLight(bool state) {
 }
 
 // ------------------------------------------------------------------
-// POST и GET (без изменений в логике, только используют новые датчики)
-
+// POST (без изменений, отправляет сырые 0/1 как раньше)
 void sendPostData(int soil_moisture, int leak, int water_reservoir) {
   if (!wifiConnected) return;
   Serial.println(F(">>> POST start"));
@@ -190,6 +208,7 @@ void sendPostData(int soil_moisture, int leak, int water_reservoir) {
   Serial.println(F("<<< POST end"));
 }
 
+// GET (без изменений)
 void getServerCommand() {
   if (!wifiConnected) return;
   Serial.println(F(">>> GET start"));
@@ -289,36 +308,37 @@ void getServerCommand() {
 }
 
 // ------------------------------------------------------------------
-// ОСНОВНОЙ ЦИКЛ СБОРА ДАННЫХ
-
 void processWiFiCycle() {
   int soilRaw = readSoilMoisture();
   int leak = readLeak();
   int water = readWaterReservoir();
 
-  // Влажность в процентах для отображения/отправки
   int soilPercent = map(soilRaw, 0, 1023, 0, 100);
 
   Serial.print(F("Sensors: soil=")); Serial.print(soilPercent);
   Serial.print(F("%, raw=")); Serial.print(soilRaw);
   Serial.print(F(", leak=")); Serial.print(leak);
-  Serial.print(F(", water=")); Serial.println(water);
+  Serial.print(F(" ("));
+  Serial.print(leak == LOW ? F("LEAK") : F("OK"));
+  Serial.print(F("), water=")); Serial.print(water);
+  Serial.print(F(" ("));
+  Serial.print(water == HIGH ? F("NO WATER") : F("OK"));
+  Serial.println(F(")"));
 
-  sendPostData(soilPercent, leak, water);  // отсылаем проценты
+  sendPostData(soilPercent, leak, water);
   delay(200);
   getServerCommand();
 }
 
-// ------------------------------------------------------------------
-// НЕМЕДЛЕННЫЕ ЗАЩИТЫ И АВТООТКЛЮЧЕНИЕ ПОМПЫ
-
 void checkSafety() {
-  // Принудительное выключение помпы при протечке или окончании таймера
   if (pumpState) {
-    if (readLeak() == 1) {
-      Serial.println(F("SAFETY: leak detected, stopping pump"));
+    // Протечка — датчик LOW
+    if (readLeak() == LOW) {
+      Serial.println(F("SAFETY: leak detected (sensor LOW), stopping pump"));
       setPump(false);
-    } else if (millis() - pumpOnTime >= 5000) {
+    }
+    // Таймер 5 секунд
+    else if (millis() - pumpOnTime >= 5000) {
       Serial.println(F("SAFETY: 5s timer, stopping pump"));
       setPump(false);
     }
@@ -331,14 +351,16 @@ void setup() {
   while (!Serial);
   Serial.println(F("=== Arduino WiFi Module with control ==="));
 
-  // Настройка пинов
   pinMode(PIN_SOIL_MOISTURE, INPUT);
   pinMode(PIN_LEAK, INPUT);
   pinMode(PIN_WATER_RESERVOIR, INPUT);
   pinMode(PIN_PUMP, OUTPUT);
   pinMode(PIN_LIGHT, OUTPUT);
+  pinMode(PIN_LED, OUTPUT);
+
   digitalWrite(PIN_PUMP, LOW);
   digitalWrite(PIN_LIGHT, LOW);
+  digitalWrite(PIN_LED, LOW);
 
   WIFI_SERIAL.begin(9600);
   WIFI_SERIAL.println(F("AT+UART_DEF=9600,8,1,0,0"));
@@ -349,10 +371,9 @@ void setup() {
 }
 
 void loop() {
-  // Постоянная проверка безопасности (протечка/таймер помпы)
   checkSafety();
+  updateLedError();   // индикатор ошибок
 
-  // Отправка данных и получение команд по расписанию
   if (millis() - lastCheckTime >= TELEMETRY_INTERVAL_MS) {
     lastCheckTime = millis();
     processWiFiCycle();
