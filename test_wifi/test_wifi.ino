@@ -11,23 +11,26 @@ const char* SERVER_IP     = "213.171.25.91";
 const int TELEMETRY_INTERVAL_MS = 10000;
 
 bool wifiConnected = false;
-unsigned long lastCheckTime = 0;          // ← добавлено
-char txBuffer[128];
+unsigned long lastCheckTime = 0;
 
-// ===================== НАДЁЖНЫЕ ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ =====================
+char txBuffer[128];
+char rxBuffer[256];      // глобальный буфер для waitForResponse
+int rxIndex = 0;
+
+// ===================== ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ =====================
+// Каждый раз очищает буфер и ждёт строку
 bool waitForResponse(const char* expected, unsigned long timeout) {
-  char tmp[64];
-  memset(tmp, 0, sizeof(tmp));
-  int idx = 0;
+  memset(rxBuffer, 0, sizeof(rxBuffer));
+  rxIndex = 0;
   unsigned long start = millis();
   while (millis() - start < timeout) {
     while (WIFI_SERIAL.available()) {
       char c = WIFI_SERIAL.read();
-      if (idx < sizeof(tmp) - 1) {
-        tmp[idx++] = c;
-        tmp[idx] = '\0';
+      if (rxIndex < sizeof(rxBuffer) - 1) {
+        rxBuffer[rxIndex++] = c;
+        rxBuffer[rxIndex] = '\0';
       }
-      if (strstr(tmp, expected)) return true;
+      if (strstr(rxBuffer, expected) != NULL) return true;
     }
   }
   return false;
@@ -99,7 +102,7 @@ void sendPostData(int soil_moisture, int leak, int water_reservoir) {
     soil_moisture, leak, water_reservoir);
   int jsonLen = strlen(json);
 
-  // 4. HTTP-запрос (длина считается без нуль-терминатора)
+  // 4. HTTP-запрос
   char httpRequest[256];
   int reqLen = snprintf(httpRequest, sizeof(httpRequest),
     "POST /smart-watering/2/post_endpoint HTTP/1.0\r\n"
@@ -179,7 +182,7 @@ void getServerCommand() {
 
   Serial.println(F("[GET] request sent, read response..."));
 
-  // 6. Читаем ответ в буфер до "CLOSED" или таймаута 10 сек
+  // 6. Читаем ответ в ЛОКАЛЬНЫЙ буфер
   char getBuffer[256];
   memset(getBuffer, 0, sizeof(getBuffer));
   int idx = 0;
@@ -192,7 +195,7 @@ void getServerCommand() {
         getBuffer[idx] = '\0';
       }
       if (strstr(getBuffer, "CLOSED")) {
-        start = 0; // выйти из внешнего цикла
+        start = 0; // выход из внешнего цикла
         break;
       }
     }
@@ -242,7 +245,7 @@ void processWiFiCycle() {
   Serial.print(F(", water=")); Serial.println(water);
 
   sendPostData(soil, leak, water);  // сначала POST
-  delay(200);                       // небольшая пауза, чтобы ESP точно освободилась
+  delay(200);                       // даём ESP освободиться
   getServerCommand();               // потом GET
 }
 
@@ -253,7 +256,7 @@ void setup() {
   Serial.println(F("=== Arduino WiFi Module ==="));
 
   WIFI_SERIAL.begin(9600);
-  // Принудительно 9600 на ESP (ESP перезагрузится)
+  // Принудительно устанавливаем скорость 9600
   WIFI_SERIAL.println("AT+UART_DEF=9600,8,1,0,0");
   delay(2000);
   flushESP();
@@ -262,6 +265,7 @@ void setup() {
 }
 
 void loop() {
+  // Никакого фонового сбора данных — ответ не воруется
   if (millis() - lastCheckTime >= TELEMETRY_INTERVAL_MS) {
     lastCheckTime = millis();
     processWiFiCycle();
