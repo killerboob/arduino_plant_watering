@@ -1,23 +1,36 @@
 #include <SoftwareSerial.h>
 #include <string.h>
 
+// ПИНЫ
+#define PIN_SOIL_MOISTURE  A5
+#define PIN_LEAK           2
+#define PIN_WATER_RESERVOIR 7
+#define PIN_PUMP           11
+#define PIN_LIGHT          12
+
 SoftwareSerial mySerial(4, 5);
 #define WIFI_SERIAL mySerial
 
 const char WIFI_SSID[] = "AS47";
 const char WIFI_PASS[] = "240490398002";
 const char SERVER_IP[] = "213.171.25.91";
-
 const int TELEMETRY_INTERVAL_MS = 10000;
 
 bool wifiConnected = false;
 unsigned long lastCheckTime = 0;
 
+// Глобальные буферы WiFi
 char txBuffer[100];
 char rxBuffer[256];
 int rxIndex = 0;
 
+// Состояния устройств
+bool pumpState = false;        // true = включена
+unsigned long pumpOnTime = 0;  // время включения для автоотключения
+bool lightState = false;
+
 // ------------------------------------------------------------------
+// ВСПОМОГАТЕЛЬНЫЕ WiFi (без изменений)
 bool waitForResponse(const char* expected, unsigned long timeout) {
   memset(rxBuffer, 0, sizeof(rxBuffer));
   rxIndex = 0;
@@ -66,13 +79,58 @@ void wifiConnect() {
   }
 }
 
-int readSoilMoisture()  { return 75; }
-int readLeak()          { return 0; }
-int readWaterReservoir() { return 0; }
-void setPump(bool state)  { Serial.println(state ? F("PUMP ON") : F("PUMP OFF")); }
-void setLight(bool state) { Serial.println(state ? F("LIGHT ON") : F("LIGHT OFF")); }
+// ------------------------------------------------------------------
+// ДАТЧИКИ И УПРАВЛЕНИЕ
+int readSoilMoisture() {
+  const int samples = 5;
+  long sum = 0;
+  for (int i = 0; i < samples; i++) {
+    sum += analogRead(PIN_SOIL_MOISTURE);
+    delay(1);
+  }
+  return sum / samples;
+}
+
+int readLeak() {
+  return digitalRead(PIN_LEAK);
+}
+
+int readWaterReservoir() {
+  return digitalRead(PIN_WATER_RESERVOIR);
+}
+
+void setPump(bool state) {
+  // защита: перед включением проверяем воду и протечку
+  if (state) {
+    if (readWaterReservoir() == 0) {
+      Serial.println(F("PUMP: no water, ignoring ON"));
+      return;
+    }
+    if (readLeak() == 1) {
+      Serial.println(F("PUMP: leak detected, ignoring ON"));
+      return;
+    }
+    // включаем
+    digitalWrite(PIN_PUMP, HIGH);
+    pumpState = true;
+    pumpOnTime = millis();
+    Serial.println(F("PUMP ON"));
+  } else {
+    digitalWrite(PIN_PUMP, LOW);
+    pumpState = false;
+    Serial.println(F("PUMP OFF"));
+  }
+}
+
+void setLight(bool state) {
+  digitalWrite(PIN_LIGHT, state ? HIGH : LOW);
+  lightState = state;
+  Serial.println(state ? F("LIGHT ON") : F("LIGHT OFF"));
+}
 
 // ------------------------------------------------------------------
+// POST и GET (без изменений в логике, только используют новые датчики)
+
 void sendPostData(int soil_moisture, int leak, int water_reservoir) {
   if (!wifiConnected) return;
   Serial.println(F(">>> POST start"));
@@ -88,18 +146,15 @@ void sendPostData(int soil_moisture, int leak, int water_reservoir) {
   }
   Serial.println(F("[POST] TCP ok"));
 
-  // Длина JSON (вычисляем один раз, txBuffer временно хранит строку)
   int jsonLen = snprintf(txBuffer, sizeof(txBuffer),
     "{\"soil moisture\":%d,\"leak\":%d,\"water reservoir\":%d,\"human_name\":\"second\"}",
     soil_moisture, leak, water_reservoir);
-  
-  // Точная длина всего HTTP-запроса
+
   const char httpHeader[] = "POST /smart-watering/2/post_endpoint HTTP/1.0\r\nHost: ";
   const char ctHeader[]   = "\r\nContent-Type: application/json\r\nContent-Length: ";
   int hostLen = strlen(SERVER_IP);
   int numDigits = (jsonLen >= 100) ? 3 : (jsonLen >= 10) ? 2 : 1;
   int fullLen = strlen(httpHeader) + hostLen + strlen(ctHeader) + numDigits + 4 + jsonLen;
-  // +4: \r\n\r\n после значения Content-Length
 
   snprintf(txBuffer, sizeof(txBuffer), "AT+CIPSEND=%d", fullLen);
   WIFI_SERIAL.println(txBuffer);
@@ -108,13 +163,11 @@ void sendPostData(int soil_moisture, int leak, int water_reservoir) {
     return;
   }
 
-  // Отправляем HTTP по частям
   WIFI_SERIAL.print(httpHeader);
   WIFI_SERIAL.print(SERVER_IP);
   WIFI_SERIAL.print(ctHeader);
   WIFI_SERIAL.print(jsonLen);
   WIFI_SERIAL.print("\r\n\r\n");
-  // JSON тело
   WIFI_SERIAL.print("{\"soil moisture\":");
   WIFI_SERIAL.print(soil_moisture);
   WIFI_SERIAL.print(",\"leak\":");
@@ -137,7 +190,6 @@ void sendPostData(int soil_moisture, int leak, int water_reservoir) {
   Serial.println(F("<<< POST end"));
 }
 
-// ------------------------------------------------------------------
 void getServerCommand() {
   if (!wifiConnected) return;
   Serial.println(F(">>> GET start"));
@@ -237,25 +289,56 @@ void getServerCommand() {
 }
 
 // ------------------------------------------------------------------
+// ОСНОВНОЙ ЦИКЛ СБОРА ДАННЫХ
+
 void processWiFiCycle() {
-  int soil = readSoilMoisture();
+  int soilRaw = readSoilMoisture();
   int leak = readLeak();
   int water = readWaterReservoir();
 
-  Serial.print(F("Sensors: soil=")); Serial.print(soil);
+  // Влажность в процентах для отображения/отправки
+  int soilPercent = map(soilRaw, 0, 1023, 0, 100);
+
+  Serial.print(F("Sensors: soil=")); Serial.print(soilPercent);
+  Serial.print(F("%, raw=")); Serial.print(soilRaw);
   Serial.print(F(", leak=")); Serial.print(leak);
   Serial.print(F(", water=")); Serial.println(water);
 
-  sendPostData(soil, leak, water);
+  sendPostData(soilPercent, leak, water);  // отсылаем проценты
   delay(200);
   getServerCommand();
+}
+
+// ------------------------------------------------------------------
+// НЕМЕДЛЕННЫЕ ЗАЩИТЫ И АВТООТКЛЮЧЕНИЕ ПОМПЫ
+
+void checkSafety() {
+  // Принудительное выключение помпы при протечке или окончании таймера
+  if (pumpState) {
+    if (readLeak() == 1) {
+      Serial.println(F("SAFETY: leak detected, stopping pump"));
+      setPump(false);
+    } else if (millis() - pumpOnTime >= 5000) {
+      Serial.println(F("SAFETY: 5s timer, stopping pump"));
+      setPump(false);
+    }
+  }
 }
 
 // ------------------------------------------------------------------
 void setup() {
   Serial.begin(9600);
   while (!Serial);
-  Serial.println(F("=== Arduino WiFi Module ==="));
+  Serial.println(F("=== Arduino WiFi Module with control ==="));
+
+  // Настройка пинов
+  pinMode(PIN_SOIL_MOISTURE, INPUT);
+  pinMode(PIN_LEAK, INPUT);
+  pinMode(PIN_WATER_RESERVOIR, INPUT);
+  pinMode(PIN_PUMP, OUTPUT);
+  pinMode(PIN_LIGHT, OUTPUT);
+  digitalWrite(PIN_PUMP, LOW);
+  digitalWrite(PIN_LIGHT, LOW);
 
   WIFI_SERIAL.begin(9600);
   WIFI_SERIAL.println(F("AT+UART_DEF=9600,8,1,0,0"));
@@ -266,6 +349,10 @@ void setup() {
 }
 
 void loop() {
+  // Постоянная проверка безопасности (протечка/таймер помпы)
+  checkSafety();
+
+  // Отправка данных и получение команд по расписанию
   if (millis() - lastCheckTime >= TELEMETRY_INTERVAL_MS) {
     lastCheckTime = millis();
     processWiFiCycle();
