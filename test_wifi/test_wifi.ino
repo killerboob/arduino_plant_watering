@@ -217,16 +217,42 @@ void getServerCommand() {
     Serial.print(F("[GET] JSON: "));
     Serial.println(json);
 
-    bool light = (strstr(json, "\"light\":\"true\"") != NULL);
-    bool pump  = (strstr(json, "\"pump\":\"true\"") != NULL);
-    Serial.print(F("[GET] light=")); Serial.print(light);
-    Serial.print(F(", pump=")); Serial.println(pump);
-    setLight(light);
-    setPump(pump);
+    // Проверяем наличие ключа "light"
+    char* lightKey = strstr(json, "\"light\":");
+    if (lightKey != NULL) {
+      // Ищем значение после ключа
+      if (strstr(lightKey, "\"light\":\"true\"")) {
+        Serial.println(F("[GET] light=true -> ON"));
+        setLight(true);
+      } else if (strstr(lightKey, "\"light\":\"false\"")) {
+        Serial.println(F("[GET] light=false -> OFF"));
+        setLight(false);
+      } else {
+        Serial.println(F("[GET] light value unknown, ignoring"));
+      }
+    } else {
+      Serial.println(F("[GET] no light command"));
+    }
+
+    // Проверяем наличие ключа "pump"
+    char* pumpKey = strstr(json, "\"pump\":");
+    if (pumpKey != NULL) {
+      if (strstr(pumpKey, "\"pump\":\"true\"")) {
+        Serial.println(F("[GET] pump=true -> ON"));
+        setPump(true);
+      } else if (strstr(pumpKey, "\"pump\":\"false\"")) {
+        Serial.println(F("[GET] pump=false -> OFF"));
+        setPump(false);
+      } else {
+        Serial.println(F("[GET] pump value unknown, ignoring"));
+      }
+    } else {
+      Serial.println(F("[GET] no pump command"));
+    }
   } else {
     Serial.println(F("[GET] no JSON found"));
   }
-
+  
   // 8. Закрываем TCP
   WIFI_SERIAL.println("AT+CIPCLOSE");
   waitForResponse("OK", 2000);
