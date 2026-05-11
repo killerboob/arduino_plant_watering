@@ -110,7 +110,7 @@ int readWaterReservoir() {
 }
 
 void updateLedError() {
-  // Светодиод горит, если протечка (LOW) или нет воды (HIGH)
+  // Светодиод горит, если протечка (LOW) или нет воды (HIGH).
   if (readLeak() == LOW || readWaterReservoir() == HIGH) {
     digitalWrite(PIN_LED, HIGH);
   } else {
